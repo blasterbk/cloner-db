@@ -112,15 +112,15 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
 
   // Target selection state
   const [targetProfiles, setTargetProfiles] = useState<SavedProfile[]>([]);
-  const [selectedTargetProfileId, setSelectedTargetProfileId] = useState<string>('prof-test-staging');
-  const [targetUri, setTargetUri] = useState<string>('mongodb://127.0.0.1:27018/?directConnection=true');
-  const [targetDbName, setTargetDbName] = useState<string>(`${db.name}_test`);
+  const [selectedTargetProfileId, setSelectedTargetProfileId] = useState<string>('');
+  const [targetUri, setTargetUri] = useState<string>('');
+  const [targetDbName, setTargetDbName] = useState<string>(`${db.name}_clone`);
   const [targetAvailableDbs, setTargetAvailableDbs] = useState<string[]>([]);
 
   // Add Target DB / Cluster Modal state
   const [isAddTargetModalOpen, setIsAddTargetModalOpen] = useState(false);
   const [newTargetName, setNewTargetName] = useState('');
-  const [newTargetUri, setNewTargetUri] = useState('mongodb://127.0.0.1:27018/?directConnection=true');
+  const [newTargetUri, setNewTargetUri] = useState('');
   const [testingTarget, setTestingTarget] = useState(false);
   const [targetTestResult, setTargetTestResult] = useState<{ success?: boolean; latency?: number; error?: string } | null>(null);
 
@@ -255,32 +255,27 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
         }
       });
       targets = Array.from(deduped.values());
-
-      if (targets.length === 0) {
-        targets = [
-          {
-            id: 'prof-test-staging',
-            name: 'Staging / QA Test Target (Port 27018)',
-            type: 'target',
-            config: { uri: 'mongodb://127.0.0.1:27018/?directConnection=true', timeout_ms: 10000 },
-            created_at: new Date().toISOString(),
-          },
-        ];
-      }
-
       setTargetProfiles(targets);
 
-      // Select active target — first in list (backend returns them sorted by created_at)
-      const first = targets[0];
-      setSelectedTargetProfileId(first.id);
-      const uri = first.config.uri || 'mongodb://127.0.0.1:27018/?directConnection=true';
-      setTargetUri(uri);
-      const uriDb = extractDbFromUri(uri);
-      const finalDb = uriDb || `${db.name}_test`;
-      setTargetDbName(finalDb);
+      if (targets.length > 0) {
+        // Select active target — first in list
+        const first = targets[0];
+        setSelectedTargetProfileId(first.id);
+        const uri = first.config.uri || '';
+        setTargetUri(uri);
+        const uriDb = extractDbFromUri(uri);
+        const finalDb = uriDb || `${db.name}_clone`;
+        setTargetDbName(finalDb);
 
-      // Immediately fetch live collections for this target cluster & database
-      loadTargetExistingCollections(uri, finalDb);
+        // Immediately fetch live collections for this target cluster & database
+        if (uri) {
+          loadTargetExistingCollections(uri, finalDb);
+        }
+      } else {
+        setSelectedTargetProfileId('');
+        setTargetUri('');
+        setTargetDbName(`${db.name}_clone`);
+      }
     } catch (e) {
       // ignore
     }

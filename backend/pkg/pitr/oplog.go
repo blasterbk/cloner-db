@@ -13,22 +13,22 @@ import (
 
 // OplogWindow holds information about the available Point-in-Time Recovery window in the cluster.
 type OplogWindow struct {
-	Available         bool      `json:"available"`
-	FirstTimestamp    uint32    `json:"first_timestamp_sec"`
-	FirstIncrement    uint32    `json:"first_increment"`
-	FirstTimeFormatted string   `json:"first_time_formatted"`
-	FirstTimeUTC      time.Time `json:"first_time_utc"`
+	Available             bool      `json:"available" bson:"available"`
+	FirstTimestamp        uint32    `json:"first_timestamp_sec" bson:"first_timestamp_sec"`
+	FirstIncrement        uint32    `json:"first_increment" bson:"first_increment"`
+	FirstTimeFormatted    string    `json:"first_time_formatted" bson:"first_time_formatted"`
+	FirstTimeUTC          time.Time `json:"first_time_utc" bson:"first_time_utc"`
 
-	LastTimestamp     uint32    `json:"last_timestamp_sec"`
-	LastIncrement     uint32    `json:"last_increment"`
-	LastTimeFormatted string    `json:"last_time_formatted"`
-	LastTimeUTC       time.Time `json:"last_time_utc"`
+	LastTimestamp         uint32    `json:"last_timestamp_sec" bson:"last_timestamp_sec"`
+	LastIncrement         uint32    `json:"last_increment" bson:"last_increment"`
+	LastTimeFormatted     string    `json:"last_time_formatted" bson:"last_time_formatted"`
+	LastTimeUTC           time.Time `json:"last_time_utc" bson:"last_time_utc"`
 
-	WindowDurationSeconds int64 `json:"window_duration_seconds"`
-	WindowDurationHuman   string `json:"window_duration_human"`
-	OplogSizeBytes        int64 `json:"oplog_size_bytes"`
-	OplogMaxSizeBytes     int64 `json:"oplog_max_size_bytes"`
-	Message               string `json:"message,omitempty"`
+	WindowDurationSeconds int64     `json:"window_duration_seconds" bson:"window_duration_seconds"`
+	WindowDurationHuman   string    `json:"window_duration_human" bson:"window_duration_human"`
+	OplogSizeBytes        int64     `json:"oplog_size_bytes" bson:"oplog_size_bytes"`
+	OplogMaxSizeBytes     int64     `json:"oplog_max_size_bytes" bson:"oplog_max_size_bytes"`
+	Message               string    `json:"message,omitempty" bson:"message,omitempty"`
 }
 
 // GetOplogWindow inspects the `local.oplog.rs` collection to determine earliest and latest timestamps.

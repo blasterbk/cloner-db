@@ -33,20 +33,9 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   activeJob,
   setActiveJob,
 }) => {
-  // Instant initialization: Load from localStorage or defaults with 0ms delay!
-  const [prodDatabases, setProdDatabases] = useState<ProdDatabaseItem[]>(() => {
-    try {
-      const cached = localStorage.getItem('mongoclone_proddbs');
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch (e) {
-      // ignore
-    }
-    return getDefaultProdDatabases();
-  });
-
+  // Live database catalog state from backend database
+  const [prodDatabases, setProdDatabases] = useState<ProdDatabaseItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDbForClone, setSelectedDbForClone] = useState<ProdDatabaseItem | null>(null);
@@ -55,7 +44,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [newDbName, setNewDbName] = useState('');
   const [newClusterName, setNewClusterName] = useState('');
-  const [newUri, setNewUri] = useState('mongodb://127.0.0.1:27017/?directConnection=true');
+  const [newUri, setNewUri] = useState('');
   const [testingNew, setTestingNew] = useState(false);
   const [savingNew, setSavingNew] = useState(false);
   const [testResult, setTestResult] = useState<{ success?: boolean; latency?: number; error?: string } | null>(null);
@@ -79,6 +68,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
   async function loadProdDatabases(showSpinner = true) {
     if (showSpinner) setRefreshing(true);
+    setLoading(true);
     try {
       const data = await fetchConnectionsOverview();
       const dbList: ProdDatabaseItem[] = [];
@@ -87,7 +77,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
         data
           .filter((item) => item.profile.type === 'source')
           .forEach((item) => {
-            const clusterUri = item.profile.config.uri || 'mongodb://127.0.0.1:27017/?directConnection=true';
+            const clusterUri = item.profile.config.uri || '';
             const clusterName = item.profile.name;
 
             if (item.catalog?.databases && item.catalog.databases.length > 0) {
@@ -113,98 +103,17 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
           });
       }
 
-      if (dbList.length > 0) {
-        const uniqueDbs = Array.from(
-          new Map(dbList.map((item) => [`${item.name}-${item.clusterUri}`, item])).values()
-        );
-        setProdDatabases(uniqueDbs);
-        try {
-          localStorage.setItem('mongoclone_proddbs', JSON.stringify(uniqueDbs));
-        } catch (e) {}
-      }
+      const uniqueDbs = Array.from(
+        new Map(dbList.map((item) => [`${item.name}-${item.clusterUri}`, item])).values()
+      );
+      setProdDatabases(uniqueDbs);
     } catch (e) {
-      // Keep existing cached databases
+      console.error('Failed to load production databases:', e);
+      setProdDatabases([]);
     } finally {
-      if (showSpinner) setRefreshing(false);
+      setRefreshing(false);
+      setLoading(false);
     }
-  }
-
-  function getDefaultProdDatabases(): ProdDatabaseItem[] {
-    return [
-      {
-        id: 'prod-ecommerce',
-        name: 'ecommerce_prod',
-        clusterName: 'Production Primary Cluster (ReplicaSet rs0)',
-        clusterUri: 'mongodb://127.0.0.1:27017/?directConnection=true',
-        sizeBytes: 840 * 1024 * 1024,
-        totalCollections: 6,
-        totalDocuments: 1250000,
-        collections: [
-          { name: 'orders', docCount: 850000, sizeBytes: 520 * 1024 * 1024, indexesCount: 3 },
-          { name: 'users', docCount: 320000, sizeBytes: 210 * 1024 * 1024, indexesCount: 2 },
-          { name: 'products', docCount: 80000, sizeBytes: 110 * 1024 * 1024, indexesCount: 2 },
-          { name: 'categories', docCount: 1200, sizeBytes: 500 * 1024, indexesCount: 1 },
-          { name: 'cart_sessions', docCount: 45000, sizeBytes: 15 * 1024 * 1024, indexesCount: 1 },
-          { name: 'reviews', docCount: 18000, sizeBytes: 8 * 1024 * 1024, indexesCount: 1 },
-        ],
-      },
-      {
-        id: 'prod-users',
-        name: 'users_and_auth',
-        clusterName: 'Production Primary Cluster (ReplicaSet rs0)',
-        clusterUri: 'mongodb://127.0.0.1:27017/?directConnection=true',
-        sizeBytes: 140 * 1024 * 1024,
-        totalCollections: 4,
-        totalDocuments: 420000,
-        collections: [
-          { name: 'accounts', docCount: 220000, sizeBytes: 80 * 1024 * 1024, indexesCount: 2 },
-          { name: 'sessions', docCount: 200000, sizeBytes: 60 * 1024 * 1024, indexesCount: 2 },
-          { name: 'login_history', docCount: 520000, sizeBytes: 90 * 1024 * 1024, indexesCount: 1 },
-          { name: 'api_tokens', docCount: 12000, sizeBytes: 4 * 1024 * 1024, indexesCount: 1 },
-        ],
-      },
-      {
-        id: 'prod-analytics',
-        name: 'analytics_events',
-        clusterName: 'Production Analytics DB (ReplicaSet rs0)',
-        clusterUri: 'mongodb://127.0.0.1:27017/?directConnection=true',
-        sizeBytes: 2400 * 1024 * 1024,
-        totalCollections: 3,
-        totalDocuments: 3400000,
-        collections: [
-          { name: 'page_views', docCount: 2800000, sizeBytes: 1900 * 1024 * 1024, indexesCount: 2 },
-          { name: 'user_clicks', docCount: 600000, sizeBytes: 500 * 1024 * 1024, indexesCount: 1 },
-          { name: 'funnels', docCount: 8000, sizeBytes: 2 * 1024 * 1024, indexesCount: 1 },
-        ],
-      },
-      {
-        id: 'prod-billing',
-        name: 'billing_service',
-        clusterName: 'Production Billing & Core Cluster',
-        clusterUri: 'mongodb://127.0.0.1:27017/?directConnection=true',
-        sizeBytes: 380 * 1024 * 1024,
-        totalCollections: 3,
-        totalDocuments: 450000,
-        collections: [
-          { name: 'invoices', docCount: 250000, sizeBytes: 220 * 1024 * 1024, indexesCount: 2 },
-          { name: 'subscriptions', docCount: 200000, sizeBytes: 160 * 1024 * 1024, indexesCount: 2 },
-          { name: 'payment_methods', docCount: 95000, sizeBytes: 40 * 1024 * 1024, indexesCount: 1 },
-        ],
-      },
-      {
-        id: 'prod-notifications',
-        name: 'notification_center',
-        clusterName: 'Production Core Cluster',
-        clusterUri: 'mongodb://127.0.0.1:27017/?directConnection=true',
-        sizeBytes: 95 * 1024 * 1024,
-        totalCollections: 2,
-        totalDocuments: 180000,
-        collections: [
-          { name: 'push_tokens', docCount: 120000, sizeBytes: 50 * 1024 * 1024, indexesCount: 1 },
-          { name: 'email_templates', docCount: 60000, sizeBytes: 45 * 1024 * 1024, indexesCount: 1 },
-        ],
-      },
-    ];
   }
 
   async function handleTestNewConn() {
@@ -233,61 +142,18 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
     try {
       const name = newClusterName.trim() ? `${newClusterName.trim()} (${newDbName.trim()})` : newDbName.trim();
-      const prof = await saveProfile(name, 'source', { uri: newUri.trim() });
+      await saveProfile(name, 'source', { uri: newUri.trim() });
       
-      let liveCollections: Array<{ name: string; docCount: number; sizeBytes: number; indexesCount: number }> = [];
-      let totalSizeBytes = 0;
-      let totalDocCount = 0;
-
-      try {
-        const cat = await fetchCatalog({ uri: newUri.trim() }, false);
-        if (cat && cat.databases && cat.databases.length > 0) {
-          const matchedDb = cat.databases.find(
-            (d: any) => d.name.toLowerCase() === newDbName.trim().toLowerCase()
-          ) || cat.databases.find((d: any) => !['admin', 'config', 'local'].includes(d.name)) || cat.databases[0];
-
-          if (matchedDb && matchedDb.collections && matchedDb.collections.length > 0) {
-            liveCollections = matchedDb.collections.map((c: any) => ({
-              name: c.name,
-              docCount: c.doc_count || 0,
-              sizeBytes: c.storage_size_bytes || 0,
-              indexesCount: c.indexes?.length || 0,
-            }));
-            totalSizeBytes = matchedDb.size_bytes;
-            totalDocCount = matchedDb.total_documents;
-          }
-        }
-      } catch (e) {
-        console.warn('Live catalog fetch:', e);
-      }
-
-      const newEntry: ProdDatabaseItem = {
-        id: prof.id ? `${prof.id}-${newDbName.trim()}` : `custom-prod-${Date.now()}`,
-        name: newDbName.trim(),
-        clusterName: newClusterName.trim() || 'Custom Production Cluster',
-        clusterUri: newUri.trim(),
-        sizeBytes: totalSizeBytes || 250 * 1024 * 1024,
-        totalCollections: liveCollections.length || 1,
-        totalDocuments: totalDocCount || 1000,
-        collections: liveCollections.length > 0 ? liveCollections : [
-          { name: 'default_collection', docCount: 1000, sizeBytes: 1024 * 1024, indexesCount: 1 },
-        ],
-      };
-
-      const updated = [newEntry, ...prodDatabases.filter(d => d.name !== newDbName.trim())];
-      setProdDatabases(updated);
-      try {
-        localStorage.setItem('mongoclone_proddbs', JSON.stringify(updated));
-      } catch (e) {}
+      await loadProdDatabases(false);
 
       setIsAddModalOpen(false);
       setNewDbName('');
       setNewClusterName('');
+      setNewUri('');
       setTestResult(null);
     } catch (e: any) {
       alert(`Failed to save database: ${e.message}`);
-    }
-    finally {
+    } finally {
       setSavingNew(false);
     }
   }
@@ -326,61 +192,16 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
     try {
       const name = editClusterName.trim() ? `${editClusterName.trim()} (${editDbName.trim()})` : editDbName.trim();
-      const profileId = editingDb.id.split('-')[0];
+      const profileId = (editingDb as any).profileId || editingDb.id.split('-')[0];
       if (profileId) {
         try {
           await updateProfile(profileId, name, { uri: editUri.trim() });
         } catch (e) {
-          // If profile was a legacy static id, create it in backend
           await saveProfile(name, 'source', { uri: editUri.trim() });
         }
       }
 
-      let liveCollections = editingDb.collections;
-      let totalSizeBytes = editingDb.sizeBytes;
-      let totalDocCount = editingDb.totalDocuments;
-
-      // If URI changed or fresh sync requested, discover collections
-      if (editUri.trim() !== editingDb.clusterUri || editDbName.trim() !== editingDb.name) {
-        try {
-          const cat = await fetchCatalog({ uri: editUri.trim() }, false);
-          if (cat && cat.databases && cat.databases.length > 0) {
-            const matchedDb = cat.databases.find(
-              (d: any) => d.name.toLowerCase() === editDbName.trim().toLowerCase()
-            ) || cat.databases.find((d: any) => !['admin', 'config', 'local'].includes(d.name)) || cat.databases[0];
-
-            if (matchedDb && matchedDb.collections && matchedDb.collections.length > 0) {
-              liveCollections = matchedDb.collections.map((c: any) => ({
-                name: c.name,
-                docCount: c.doc_count || 0,
-                sizeBytes: c.storage_size_bytes || 0,
-                indexesCount: c.indexes?.length || 0,
-              }));
-              totalSizeBytes = matchedDb.size_bytes;
-              totalDocCount = matchedDb.total_documents;
-            }
-          }
-        } catch (e) {
-          console.warn('Catalog fetch on edit fallback:', e);
-        }
-      }
-
-      const updatedItem: ProdDatabaseItem = {
-        ...editingDb,
-        name: editDbName.trim(),
-        clusterName: editClusterName.trim() || 'Custom Production Cluster',
-        clusterUri: editUri.trim(),
-        sizeBytes: totalSizeBytes,
-        totalCollections: liveCollections.length,
-        totalDocuments: totalDocCount,
-        collections: liveCollections,
-      };
-
-      const updatedList = prodDatabases.map((d) => (d.id === editingDb.id ? updatedItem : d));
-      setProdDatabases(updatedList);
-      try {
-        localStorage.setItem('mongoclone_proddbs', JSON.stringify(updatedList));
-      } catch (e) {}
+      await loadProdDatabases(false);
 
       setIsEditModalOpen(false);
       setEditingDb(null);
@@ -394,7 +215,6 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     if (!dbToDelete) return;
     const item = dbToDelete;
 
-    // Extract profile ID reliably (UUID or prof-*)
     const lastHyphen = item.id.lastIndexOf(`-${item.name}`);
     const profileId = (item as any).profileId || (lastHyphen !== -1 ? item.id.substring(0, lastHyphen) : item.id.split('-')[0]);
     if (profileId) {
@@ -405,12 +225,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       }
     }
 
-    const updated = prodDatabases.filter((d) => d.id !== item.id);
-    setProdDatabases(updated);
-    try {
-      localStorage.setItem('mongoclone_proddbs', JSON.stringify(updated));
-    } catch (err) {}
-
+    await loadProdDatabases(false);
     setDbToDelete(null);
   }
 

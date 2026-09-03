@@ -9,17 +9,17 @@ import (
 
 // EndpointConfig holds connection parameters for a MongoDB instance or cluster.
 type EndpointConfig struct {
-	URI              string `json:"uri"`               // Full connection URI (takes priority)
-	Host             string `json:"host"`              // Hostname or IP
-	Port             int    `json:"port"`              // Port (default: 27017)
-	Username         string `json:"username"`          // Username
-	Password         string `json:"password"`          // Password
-	AuthSource       string `json:"auth_source"`       // Auth database (default: "admin")
-	ReplicaSet       string `json:"replica_set"`       // Replica set name (if applicable)
-	TLSEnabled       bool   `json:"tls_enabled"`       // Use TLS/SSL
-	TLSSkipVerify    bool   `json:"tls_skip_verify"`   // Skip TLS certificate verification
-	DirectConnection bool   `json:"direct_connection"` // Force direct connection to host
-	TimeoutMs        int    `json:"timeout_ms"`        // Connect timeout in milliseconds
+	URI              string `json:"uri" bson:"uri"`                               // Full connection URI (takes priority)
+	Host             string `json:"host" bson:"host"`                             // Hostname or IP
+	Port             int    `json:"port" bson:"port"`                             // Port (default: 27017)
+	Username         string `json:"username" bson:"username"`                     // Username
+	Password         string `json:"password" bson:"password"`                     // Password
+	AuthSource       string `json:"auth_source" bson:"auth_source"`               // Auth database (default: "admin")
+	ReplicaSet       string `json:"replica_set" bson:"replica_set"`               // Replica set name (if applicable)
+	TLSEnabled       bool   `json:"tls_enabled" bson:"tls_enabled"`               // Use TLS/SSL
+	TLSSkipVerify    bool   `json:"tls_skip_verify" bson:"tls_skip_verify"`       // Skip TLS certificate verification
+	DirectConnection bool   `json:"direct_connection" bson:"direct_connection"`   // Force direct connection to host
+	TimeoutMs        int    `json:"timeout_ms" bson:"timeout_ms"`                 // Connect timeout in milliseconds
 }
 
 // GetEffectiveURI returns the formatted MongoDB connection URI string.

@@ -62,7 +62,15 @@ func main() {
 		dataDir = "data"
 	}
 
-	store := jobs.NewStore(dataDir)
+	mongoURI := os.Getenv("PROFILES_DB_URI")
+	if mongoURI == "" {
+		mongoURI = os.Getenv("MONGODB_URI")
+	}
+	if mongoURI == "" {
+		mongoURI = os.Getenv("DEFAULT_TARGET_URI")
+	}
+
+	store := jobs.NewStore(dataDir, mongoURI)
 	hub := ws.NewHub()
 	go hub.Run()
 

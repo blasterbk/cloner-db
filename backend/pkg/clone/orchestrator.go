@@ -11,6 +11,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/mongoclone/engine/pkg/jobs"
@@ -36,10 +37,14 @@ func NewOrchestrator(store *jobs.Store, hub *ws.Hub, dataDir string) *Orchestrat
 	if dataDir == "" {
 		dataDir = "data"
 	}
+	var checkColl *mongo.Collection
+	if db := store.GetDB(); db != nil {
+		checkColl = db.Collection("mongoclone_checkpoints")
+	}
 	return &Orchestrator{
 		store:         store,
 		hub:           hub,
-		checkpointMgr: NewCheckpointManager(dataDir),
+		checkpointMgr: NewCheckpointManager(dataDir, checkColl),
 		cancelFuncs:   make(map[string]context.CancelFunc),
 	}
 }
@@ -571,4 +576,5 @@ func (o *Orchestrator) failJob(job *types.CloneJob, errMsg string) {
 func (o *Orchestrator) broadcastUpdate(job *types.CloneJob) {
 	snapshot := job.GetSnapshot()
 	o.hub.BroadcastJSON("PROGRESS", job.ID, snapshot)
+	o.store.SaveJob(job)
 }
