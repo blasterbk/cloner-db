@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Production builds & compiled artifacts
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+/server
+/backend/server
+tsconfig.tsbuildinfo
+
+# Environment & credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Local dynamic runtime data
+backend/data/*.json
+backend/data/checkpoints/
+!backend/data/.gitkeep
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log
