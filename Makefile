@@ -2,29 +2,34 @@
 
 all: test build
 
-build:
+build-frontend:
 	@echo "Building frontend..."
 	cd frontend && npm run build
-	@echo "Building backend..."
+	@echo "Syncing frontend build to backend/web for embedding..."
+	mkdir -p backend/web
+	cp -r frontend/dist/* backend/web/
+
+build-backend:
+	@echo "Building unified backend binary (with embedded frontend)..."
 	cd backend && go build -o ../bin/mongoclone cmd/server/main.go
+
+build: build-frontend build-backend
 
 test:
 	@echo "Running backend unit tests..."
 	cd backend && go test -v ./...
-	@echo "Running frontend type check & build..."
-	cd frontend && npm run build
 
-run-backend:
-	@echo "Starting MongoClone Backend on port 8080..."
+run:
+	@echo "Starting MongoClone Unified Server (API + Web UI) on port 8080..."
 	cd backend && go run cmd/server/main.go
 
-run-frontend:
-	@echo "Starting MongoClone Frontend on port 5173..."
+run-backend: run
+
+run-frontend-dev:
+	@echo "Starting MongoClone Frontend in dev mode (with HMR) on port 5173..."
 	cd frontend && npm run dev
 
-dev:
-	@echo "Running backend in background..."
-	cd backend && go run cmd/server/main.go
+dev: run
 
 env-up:
 	docker compose up -d

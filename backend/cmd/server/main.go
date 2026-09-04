@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/mongoclone/engine/pkg/pitr"
 	"github.com/mongoclone/engine/pkg/types"
 	"github.com/mongoclone/engine/pkg/ws"
+	"github.com/mongoclone/engine/web"
 )
 
 // loadEnvFile reads a .env file and sets environment variables (no external dependency needed)
@@ -432,22 +435,79 @@ func main() {
 	// 7. WebSocket live progress endpoint
 	mux.HandleFunc("/ws", hub.ServeHTTP)
 
-	// 8. Static frontend file server (if built)
-	frontendDist := filepath.Join("..", "frontend", "dist")
-	if _, err := os.Stat(frontendDist); err == nil {
-		fs := http.FileServer(http.Dir(frontendDist))
+	// 8. Static frontend file server (Embedded with fallback to disk)
+	var frontendFS fs.FS
+	var frontendSource string
+
+	if web.HasEmbedded() {
+		frontendFS = web.GetFS()
+		frontendSource = "embedded binary assets"
+	} else {
+		// Fallback check on local disk
+		candidates := []string{
+			filepath.Join("..", "frontend", "dist"),
+			"web",
+			"dist",
+		}
+		for _, dir := range candidates {
+			if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
+				frontendFS = os.DirFS(dir)
+				frontendSource = fmt.Sprintf("disk folder (%s)", dir)
+				break
+			}
+		}
+	}
+
+	if frontendFS != nil {
+		fileServer := http.FileServer(http.FS(frontendFS))
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" || r.URL.Path == "/health" {
 				http.NotFound(w, r)
 				return
 			}
-			path := filepath.Join(frontendDist, r.URL.Path)
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				http.ServeFile(w, r, filepath.Join(frontendDist, "index.html"))
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			fs.ServeHTTP(w, r)
+
+			reqPath := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+			if reqPath == "" || reqPath == "." {
+				reqPath = "index.html"
+			}
+
+			// Check if file exists in filesystem
+			f, err := frontendFS.Open(reqPath)
+			if err != nil {
+				// SPA fallback to index.html for client-side routing
+				indexContent, readErr := fs.ReadFile(frontendFS, "index.html")
+				if readErr != nil {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(indexContent)
+				return
+			}
+
+			stat, statErr := f.Stat()
+			_ = f.Close()
+			if statErr == nil && stat.IsDir() {
+				// Directory requested, serve index.html
+				indexContent, readErr := fs.ReadFile(frontendFS, "index.html")
+				if readErr == nil {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(indexContent)
+					return
+				}
+			}
+
+			fileServer.ServeHTTP(w, r)
 		})
+		log.Printf("[frontend] Serving web UI via %s", frontendSource)
+	} else {
+		log.Printf("[frontend] No frontend assets found. Only API and WebSocket enabled.")
 	}
 
 	addr := fmt.Sprintf("0.0.0.0:%s", port)

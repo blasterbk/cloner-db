@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'mongoclone-backend',
+      name: 'mongoclone',
       cwd: './backend',
       script: './mongoclone',
       instances: 1,
@@ -12,16 +12,6 @@ module.exports = {
         PORT: 8080,
         DATA_DIR: 'data'
       }
-    },
-    {
-      name: 'mongoclone-frontend',
-      cwd: './frontend',
-      script: 'npx',
-      args: 'serve -s dist -l 5173',
-      instances: 1,
-      autorestart: true,
-      watch: false,
-      max_memory_restart: '500M'
     }
   ]
 };
