@@ -156,7 +156,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	o.broadcastUpdate(job)
 
 	// Step 1: Pre-flight connections
-	job.Progress.Phase = "Pre-flight Check"
+	job.SetProgressPhase("Pre-flight Check")
 	job.AddLog("INFO", fmt.Sprintf("Connecting to source: %s", job.SourceMasked))
 	sourceClient, err := mongopkg.Connect(ctx, &job.Request.Source)
 	if err != nil {
@@ -190,7 +190,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	// Step 2: Check Oplog if in PITR mode & get snapshot baseline timestamp
 	var baselineTS primitive.Timestamp
 	if job.Request.Mode == types.ModePITR {
-		job.Progress.Phase = "Oplog Window Inspection"
+		job.SetProgressPhase("Oplog Window Inspection")
 		oplogWindow, err := pitr.GetOplogWindow(ctx, sourceClient)
 		if err != nil || !oplogWindow.Available {
 			job.AddLog("WARN", fmt.Sprintf("Oplog check note: %v. Proceeding with snapshot baseline.", oplogWindow.Message))
@@ -214,7 +214,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	}
 
 	// Step 3: Catalog & Schema Discovery
-	job.Progress.Phase = "Catalog Discovery"
+	job.SetProgressPhase("Catalog Discovery")
 	job.AddLog("INFO", "Inspecting database catalog and schema metadata...")
 	catalog, err := mongopkg.InspectCatalog(ctx, sourceClient, false)
 	if err != nil {
@@ -232,6 +232,8 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 
 	var plan []planItem
 	dbMap := make(map[string]string)
+	var totalEstDocs int64
+	var totalEstBytes int64
 
 	for _, dbMapping := range job.Request.Databases {
 		targetDB := dbMapping.TargetDatabase
@@ -285,8 +287,8 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 					Detail:     collDetail,
 				})
 
-				job.Progress.TotalEstimatedDocs += collDetail.DocCount
-				job.Progress.TotalEstimatedBytes += collDetail.StorageSize
+				totalEstDocs += collDetail.DocCount
+				totalEstBytes += collDetail.StorageSize
 			}
 		}
 
@@ -332,16 +334,16 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 								DocCount: cnt,
 							},
 						})
-						job.Progress.TotalEstimatedDocs += cnt
+						totalEstDocs += cnt
 					}
 				}
 			}
 		}
 	}
 
-	job.Progress.TotalCollections = len(plan)
+	job.InitProgressTotals(len(plan), totalEstDocs, totalEstBytes)
 	job.AddLog("INFO", fmt.Sprintf("Discovered %d collections to clone (est. %d documents, %.2f MB)",
-		len(plan), job.Progress.TotalEstimatedDocs, float64(job.Progress.TotalEstimatedBytes)/(1024*1024)))
+		len(plan), totalEstDocs, float64(totalEstBytes)/(1024*1024)))
 	o.broadcastUpdate(job)
 
 	// Step 4: Checkpoint & Worker Pool Setup
@@ -351,7 +353,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 		o.checkpointMgr.InitCollection(job.ID, collKey, item.SourceDB, item.SourceColl, item.TargetDB, item.TargetColl, item.Detail.DocCount)
 	}
 
-	job.Progress.Phase = "Copying Collections (Multi-Worker Parallel)"
+	job.SetProgressPhase("Copying Collections (Multi-Worker Parallel)")
 	masker := NewDataMasker(job.Request.MaskingRules)
 	indexer := NewIndexReplicator(targetClient)
 
@@ -373,7 +375,6 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	var indexTasks []IndexTask
 	var indexTasksMu sync.Mutex
 
-	var progressMu sync.Mutex
 	var completedCollsCount int64
 	var totalTransDocs int64
 	var totalTransBytes int64
@@ -393,9 +394,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 				}
 			}
 		}
-		job.Progress.CompletedCollections = int(completedCollsCount)
-		job.Progress.TransferredDocs = totalTransDocs
-		job.Progress.TransferredBytes = totalTransBytes
+		job.SyncResumeProgress(int(completedCollsCount), totalTransDocs, totalTransBytes)
 		o.broadcastUpdate(job)
 	}
 
@@ -463,41 +462,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 					ResumeFromID:     resumeID,
 					Masker:           masker,
 					ProgressCallback: func(p types.CollectionCopyProgress) {
-						progressMu.Lock()
-						job.Progress.CurrentCollection = fmt.Sprintf("%s.%s -> %s.%s", p.DatabaseName, p.CollectionName, p.TargetDatabase, p.TargetCollection)
-						if job.Progress.Collections == nil {
-							job.Progress.Collections = make(map[string]types.CollectionCopyProgress)
-						}
-						job.Progress.Collections[collKey] = p
-
-						// Calculate overall totals
-						var liveDocs int64
-						var liveBytes int64
-						for _, cpEntry := range job.Progress.Collections {
-							liveDocs += cpEntry.TransferredDocs
-							liveBytes += cpEntry.TransferredBytes
-						}
-						job.Progress.TransferredDocs = liveDocs
-						job.Progress.TransferredBytes = liveBytes
-						job.Progress.DocsPerSec = p.DocsPerSec
-						job.Progress.ThroughputMBs = float64(p.BytesPerSec) / (1024 * 1024)
-						job.DurationSec = int64(time.Since(jobStart).Seconds())
-
-						if job.Progress.TotalEstimatedDocs > 0 {
-							job.Progress.Percent = float64(liveDocs) / float64(job.Progress.TotalEstimatedDocs) * 100
-							if job.Progress.Percent > 100 {
-								job.Progress.Percent = 100
-							}
-							if p.DocsPerSec > 0 {
-								remDocs := job.Progress.TotalEstimatedDocs - liveDocs
-								if remDocs > 0 {
-									job.Progress.ETASeconds = remDocs / p.DocsPerSec
-								} else {
-									job.Progress.ETASeconds = 0
-								}
-							}
-						}
-						progressMu.Unlock()
+						job.UpdateCollectionProgress(collKey, p, jobStart)
 						o.broadcastUpdate(job)
 					},
 					OnBatchCommitted: func(lastID any, docsInBatch int64, bytesInBatch int64) {
@@ -523,9 +488,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 				o.checkpointMgr.MarkCollectionCompleted(job.ID, collKey, res.TransferredDocs, res.TransferredBytes)
 				atomic.AddInt64(&completedCollsCount, 1)
 
-				progressMu.Lock()
-				job.Progress.CompletedCollections = int(atomic.LoadInt64(&completedCollsCount))
-				progressMu.Unlock()
+				job.SetCompletedCollections(int(atomic.LoadInt64(&completedCollsCount)))
 				o.broadcastUpdate(job)
 			}
 		}(w)
@@ -556,7 +519,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 
 	// Step 5: Post-Copy Deferred Parallel Index Building ("Index Later")
 	if len(indexTasks) > 0 {
-		job.Progress.Phase = "Building Secondary Indexes (Parallel)"
+		job.SetProgressPhase("Building Secondary Indexes (Parallel)")
 		job.AddLog("INFO", fmt.Sprintf("⚡ Bulk Stream complete! Creating secondary indexes across %d collections in parallel...", len(indexTasks)))
 		o.broadcastUpdate(job)
 
@@ -570,7 +533,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 
 	// Step 6: Oplog PITR Replay (if requested)
 	if job.Request.Mode == types.ModePITR && job.Request.PITRTimestamp != nil {
-		job.Progress.Phase = "Replaying Oplog (PITR)"
+		job.SetProgressPhase("Replaying Oplog (PITR)")
 		job.AddLog("INFO", fmt.Sprintf("Replaying oplog from snapshot baseline %d up to target timestamp %d...",
 			baselineTS.T, job.Request.PITRTimestamp.T))
 
@@ -579,7 +542,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 			UntilTimestamp: *job.Request.PITRTimestamp,
 			DatabaseMap:    dbMap,
 			ProgressCb: func(replayedCount int64, currentTS primitive.Timestamp, lastOp string) {
-				job.Progress.ReplayedOplogOps = replayedCount
+				job.SetProgressReplayedOplogOps(replayedCount)
 				o.broadcastUpdate(job)
 			},
 		})
@@ -588,15 +551,13 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 		if err != nil {
 			job.AddLog("WARN", fmt.Sprintf("Oplog replay warning: %v", err))
 		} else {
-			job.Progress.ReplayedOplogOps = replayed
+			job.SetProgressReplayedOplogOps(replayed)
 			job.AddLog("SUCCESS", fmt.Sprintf("Successfully replayed %d incremental oplog operations", replayed))
 		}
 	}
 
 	// Step 7: Finalize
-	job.Progress.Phase = "Complete"
-	job.Progress.Percent = 100
-	job.Progress.ETASeconds = 0
+	job.CompleteProgress()
 	job.SetStatus(types.StatusCompleted)
 	job.AddLog("SUCCESS", fmt.Sprintf("Database clone completed successfully! Transferred %d documents (%.2f MB) in %d seconds.",
 		job.Progress.TransferredDocs, float64(job.Progress.TransferredBytes)/(1024*1024), job.DurationSec))

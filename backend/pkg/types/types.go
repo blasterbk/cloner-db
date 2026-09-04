@@ -1,6 +1,7 @@
 package types
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -162,6 +163,96 @@ func (j *CloneJob) UpdateProgress(p ProgressTelemetry) {
 	j.Progress = p
 }
 
+// SetProgressPhase updates the current phase thread-safely.
+func (j *CloneJob) SetProgressPhase(phase string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Progress.Phase = phase
+}
+
+// InitProgressTotals initializes total estimated statistics.
+func (j *CloneJob) InitProgressTotals(totalColls int, totalDocs, totalBytes int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Progress.TotalCollections = totalColls
+	j.Progress.TotalEstimatedDocs = totalDocs
+	j.Progress.TotalEstimatedBytes = totalBytes
+	if j.Progress.Collections == nil {
+		j.Progress.Collections = make(map[string]CollectionCopyProgress)
+	}
+}
+
+// SyncResumeProgress sets progress counters when resuming from a checkpoint.
+func (j *CloneJob) SyncResumeProgress(completedColls int, transferredDocs, transferredBytes int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Progress.CompletedCollections = completedColls
+	j.Progress.TransferredDocs = transferredDocs
+	j.Progress.TransferredBytes = transferredBytes
+}
+
+// SetCompletedCollections updates completed collections count thread-safely.
+func (j *CloneJob) SetCompletedCollections(completed int) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Progress.CompletedCollections = completed
+}
+
+// SetProgressReplayedOplogOps updates PITR oplog progress thread-safely.
+func (j *CloneJob) SetProgressReplayedOplogOps(ops int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Progress.ReplayedOplogOps = ops
+}
+
+// CompleteProgress marks the progress telemetry as finished thread-safely.
+func (j *CloneJob) CompleteProgress() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Progress.Phase = "Complete"
+	j.Progress.Percent = 100
+	j.Progress.ETASeconds = 0
+}
+
+// UpdateCollectionProgress thread-safely updates progress for a collection and recalculates overall job totals.
+func (j *CloneJob) UpdateCollectionProgress(collKey string, p CollectionCopyProgress, jobStart time.Time) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	j.Progress.CurrentCollection = fmt.Sprintf("%s.%s -> %s.%s", p.DatabaseName, p.CollectionName, p.TargetDatabase, p.TargetCollection)
+	if j.Progress.Collections == nil {
+		j.Progress.Collections = make(map[string]CollectionCopyProgress)
+	}
+	j.Progress.Collections[collKey] = p
+
+	var liveDocs int64
+	var liveBytes int64
+	for _, cpEntry := range j.Progress.Collections {
+		liveDocs += cpEntry.TransferredDocs
+		liveBytes += cpEntry.TransferredBytes
+	}
+	j.Progress.TransferredDocs = liveDocs
+	j.Progress.TransferredBytes = liveBytes
+	j.Progress.DocsPerSec = p.DocsPerSec
+	j.Progress.ThroughputMBs = float64(p.BytesPerSec) / (1024 * 1024)
+	j.DurationSec = int64(time.Since(jobStart).Seconds())
+
+	if j.Progress.TotalEstimatedDocs > 0 {
+		j.Progress.Percent = float64(liveDocs) / float64(j.Progress.TotalEstimatedDocs) * 100
+		if j.Progress.Percent > 100 {
+			j.Progress.Percent = 100
+		}
+		if p.DocsPerSec > 0 {
+			remDocs := j.Progress.TotalEstimatedDocs - liveDocs
+			if remDocs > 0 {
+				j.Progress.ETASeconds = remDocs / p.DocsPerSec
+			} else {
+				j.Progress.ETASeconds = 0
+			}
+		}
+	}
+}
+
 // SetStatus updates job status.
 func (j *CloneJob) SetStatus(status JobStatus) {
 	j.mu.Lock()
@@ -171,7 +262,7 @@ func (j *CloneJob) SetStatus(status JobStatus) {
 	now := time.Now().UTC()
 	if status == StatusRunning && j.StartedAt == nil {
 		j.StartedAt = &now
-	} else if status == StatusCompleted || status == StatusFailed || status == StatusCancelled {
+	} else if status == StatusCompleted || status == StatusFailed || status == StatusCancelled || status == StatusPaused {
 		j.FinishedAt = &now
 		if j.StartedAt != nil {
 			j.DurationSec = int64(now.Sub(*j.StartedAt).Seconds())
@@ -188,9 +279,13 @@ func (j *CloneJob) GetSnapshot() CloneJob {
 	copied.Logs = make([]LogEntry, len(j.Logs))
 	copy(copied.Logs, j.Logs)
 
-	copied.Progress.Collections = make(map[string]CollectionCopyProgress)
-	for k, v := range j.Progress.Collections {
-		copied.Progress.Collections[k] = v
+	if j.Progress.Collections != nil {
+		copied.Progress.Collections = make(map[string]CollectionCopyProgress, len(j.Progress.Collections))
+		for k, v := range j.Progress.Collections {
+			copied.Progress.Collections[k] = v
+		}
+	} else {
+		copied.Progress.Collections = make(map[string]CollectionCopyProgress)
 	}
 
 	return copied
