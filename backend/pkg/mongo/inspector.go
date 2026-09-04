@@ -128,17 +128,19 @@ func InspectCatalog(ctx context.Context, client *mongo.Client, includeSystemDBs 
 		}
 	}
 
-	// Strategy E: Incorporate database hints (from URI, profile name, or target job spec)
-	for _, hint := range targetDBHints {
-		hint = strings.TrimSpace(hint)
-		if hint == "" {
-			continue
-		}
-		if !includeSystemDBs && slices.Contains(SystemDatabases, hint) {
-			continue
-		}
-		if !slices.Contains(dbNames, hint) {
-			dbNames = append(dbNames, hint)
+	// Strategy E: Incorporate database hints ONLY if no databases were discovered via admin/cluster commands
+	if len(dbNames) == 0 {
+		for _, hint := range targetDBHints {
+			hint = strings.TrimSpace(hint)
+			if hint == "" {
+				continue
+			}
+			if !includeSystemDBs && slices.Contains(SystemDatabases, hint) {
+				continue
+			}
+			if !slices.Contains(dbNames, hint) {
+				dbNames = append(dbNames, hint)
+			}
 		}
 	}
 
@@ -183,6 +185,13 @@ func InspectCatalog(ctx context.Context, client *mongo.Client, includeSystemDBs 
 			var collSpecs []bson.M
 			if err := collsCursor.All(collCtx, &collSpecs); err != nil {
 				resultsChan <- dbResult{index: idx, detail: dbDetail}
+				return
+			}
+
+			// If this database has 0 collections, 0 bytes on disk, AND other databases were discovered:
+			// it is a non-existent phantom database on the MongoDB server. Skip it!
+			if len(collSpecs) == 0 && dbSizes[dName] == 0 && len(filteredDBs) > 1 {
+				resultsChan <- dbResult{index: idx, detail: DatabaseDetail{Name: dName, TotalCollections: -1}}
 				return
 			}
 
@@ -332,6 +341,9 @@ func InspectCatalog(ctx context.Context, client *mongo.Client, includeSystemDBs 
 
 	for i := 0; i < len(filteredDBs); i++ {
 		if d, ok := dbMap[i]; ok {
+			if d.TotalCollections < 0 {
+				continue // skip non-existent phantom database
+			}
 			if d.SizeBytes == 0 {
 				var calcSize int64
 				for _, c := range d.Collections {

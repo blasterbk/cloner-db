@@ -284,10 +284,12 @@ func main() {
 				item.Online = true
 				item.ServerInfo = info
 
-				// Fetch lightweight catalog with target DB hints
-				dbHintURI := fastCfg.ExtractDatabaseName()
-				dbHintProfile := mongopkg.ExtractDatabaseFromProfileName(p.Name)
-				cat, err := mongopkg.InspectCatalog(ctx, client, false, dbHintURI, dbHintProfile)
+				// Fetch lightweight catalog with target DB hint from URI
+				var dbHints []string
+				if dbName := fastCfg.ExtractDatabaseName(); dbName != "" {
+					dbHints = append(dbHints, dbName)
+				}
+				cat, err := mongopkg.InspectCatalog(ctx, client, false, dbHints...)
 				if err == nil {
 					item.Catalog = cat
 				}

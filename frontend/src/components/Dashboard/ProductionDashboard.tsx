@@ -107,7 +107,13 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
               'database';
 
             if (item.catalog?.databases && item.catalog.databases.length > 0) {
-              item.catalog.databases.forEach((d) => {
+              // Ignore phantom 0-collection databases if at least one real database with collections/data exists for this connection
+              const realDbs = item.catalog.databases.filter(
+                (d) => (d.collections && d.collections.length > 0) || d.size_bytes > 0 || (d.total_collections || 0) > 0
+              );
+              const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
+
+              dbsToShow.forEach((d) => {
                 dbList.push({
                   id: `${item.profile.id}-${d.name}`,
                   profileId: item.profile.id,
@@ -703,7 +709,22 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
                   type="text"
                   placeholder="mongodb://user:password@host:27017/admin"
                   value={newUri}
-                  onChange={(e) => setNewUri(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setNewUri(val);
+                    if (!newDbName.trim()) {
+                      try {
+                        const u = val.split('?')[0].replace(/\/+$/, '');
+                        const lastSlash = u.lastIndexOf('/');
+                        if (lastSlash !== -1) {
+                          const sub = u.substring(lastSlash + 1);
+                          if (sub && sub !== 'admin' && !sub.includes('@') && !sub.includes(':')) {
+                            setNewDbName(sub);
+                          }
+                        }
+                      } catch {}
+                    }
+                  }}
                   className="w-full glass-input px-3.5 py-2.5 rounded-xl font-mono text-xs"
                 />
               </div>
