@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { fetchConnectionsOverview, saveProfile, updateProfile, deleteProfile, testConnection, fetchCatalog } from '../../api/client';
+import { fetchConnectionsOverview, saveProfile, updateProfile, deleteProfile, testConnection, fetchCatalog, cancelJob } from '../../api/client';
 import { ProdDatabaseItem, SideBySideCloneView } from '../Clone/SideBySideCloneView';
 import { CloneJob } from '../../types';
 import {
@@ -70,6 +70,34 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
   // Delete confirmation modal state
   const [dbToDelete, setDbToDelete] = useState<ProdDatabaseItem | null>(null);
+
+  // Active job cancellation state
+  const [cancellingActiveJob, setCancellingActiveJob] = useState(false);
+
+  async function handleCancelActiveJob(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!activeJob) return;
+    const isPaused = activeJob.status === 'PAUSED';
+    const confirmMsg = isPaused
+      ? `Are you sure you want to cancel and dismiss this paused migration (${activeJob.name})?`
+      : `Are you sure you want to stop and cancel this migration (${activeJob.name})?`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setCancellingActiveJob(true);
+    try {
+      await cancelJob(activeJob.id);
+    } catch (e: any) {
+      console.error('Failed to cancel job:', e);
+    } finally {
+      try {
+        localStorage.setItem('mongoclone_dismissed_job_id', activeJob.id);
+        localStorage.removeItem('mongoclone_active_job_id');
+        localStorage.removeItem('mongoclone_selected_db_name');
+      } catch (e) {}
+      setActiveJob(null);
+      setCancellingActiveJob(false);
+    }
+  }
 
   useEffect(() => {
     // Non-blocking background sync
@@ -424,6 +452,17 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleCancelActiveJob}
+              disabled={cancellingActiveJob}
+              className="px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-300 hover:text-white bg-rose-500/15 hover:bg-rose-500/30 border border-rose-500/30 transition-all flex items-center gap-1.5 shadow-sm"
+              title="Cancel and dismiss this migration permanently"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>{cancellingActiveJob ? 'Cancelling...' : 'Cancel & Dismiss'}</span>
+            </button>
+
             <button
               onClick={() => {
                 const srcDbName = activeJob.request?.databases?.[0]?.source_database;

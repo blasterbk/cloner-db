@@ -568,13 +568,21 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
 
   async function handleCancel() {
     if (!activeJob) return;
+    if (!window.confirm('Are you sure you want to cancel this clone migration?')) {
+      return;
+    }
     setCancelling(true);
-    setActiveJob((prev) => (prev ? { ...prev, status: 'CANCELLED' } : null));
     try {
       await cancelJob(activeJob.id);
+      try {
+        localStorage.setItem('mongoclone_dismissed_job_id', activeJob.id);
+        localStorage.removeItem('mongoclone_active_job_id');
+        localStorage.removeItem('mongoclone_selected_db_name');
+      } catch (e) {}
+      setActiveJob(null);
+      onBack();
     } catch (e: any) {
       alert(`Failed to cancel clone: ${e.message || e}`);
-    } finally {
       setCancelling(false);
     }
   }

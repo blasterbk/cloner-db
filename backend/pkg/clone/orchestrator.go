@@ -527,6 +527,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 			job.AddLog("WARN", "Job execution was cancelled. Checkpoint saved for resume.")
 		}
 		o.checkpointMgr.FlushCheckpoint(job.ID)
+		o.store.SaveJob(job)
 		o.broadcastUpdate(job)
 		return
 	}

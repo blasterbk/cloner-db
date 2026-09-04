@@ -190,6 +190,11 @@ func (s *Store) syncJobs(ctx context.Context) {
 				if copyJob.Status == types.StatusRunning {
 					copyJob.Status = types.StatusPaused
 					copyJob.AddLog("WARN", "Server restarted while clone was in progress. Job paused with checkpoint preserved. Ready to resume.")
+					// Persist paused status back to MongoDB so it doesn't stay 'RUNNING' in DB across rebuilds
+					saveCtx, saveCancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+					opts := options.Replace().SetUpsert(true)
+					_, _ = s.jobsColl.ReplaceOne(saveCtx, bson.M{"id": copyJob.ID}, copyJob.GetSnapshot(), opts)
+					saveCancel()
 				}
 				s.jobs[j.ID] = &copyJob
 			}
@@ -287,12 +292,10 @@ func (s *Store) CreateJob(req types.CloneJobRequest) *types.CloneJob {
 	s.save()
 
 	if s.jobsColl != nil {
-		go func(item types.CloneJob) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			opts := options.Replace().SetUpsert(true)
-			_, _ = s.jobsColl.ReplaceOne(ctx, bson.M{"id": item.ID}, item, opts)
-		}(job.GetSnapshot())
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		opts := options.Replace().SetUpsert(true)
+		_, _ = s.jobsColl.ReplaceOne(ctx, bson.M{"id": id}, job.GetSnapshot(), opts)
+		cancel()
 	}
 
 	return job
@@ -307,12 +310,10 @@ func (s *Store) SaveJob(job *types.CloneJob) {
 	s.save()
 
 	if s.jobsColl != nil {
-		go func(item types.CloneJob) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			opts := options.Replace().SetUpsert(true)
-			_, _ = s.jobsColl.ReplaceOne(ctx, bson.M{"id": item.ID}, item, opts)
-		}(job.GetSnapshot())
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		opts := options.Replace().SetUpsert(true)
+		_, _ = s.jobsColl.ReplaceOne(ctx, bson.M{"id": job.ID}, job.GetSnapshot(), opts)
+		cancel()
 	}
 }
 
@@ -387,22 +388,16 @@ func (s *Store) ListJobs() []types.CloneJob {
 // DeleteJob removes a job record from memory, local backup, and MongoDB.
 func (s *Store) DeleteJob(id string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	delete(s.jobs, id)
+	s.save()
+	s.mu.Unlock()
 
-	if _, ok := s.jobs[id]; ok {
-		delete(s.jobs, id)
-		s.save()
-
-		if s.jobsColl != nil {
-			go func(delID string) {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_, _ = s.jobsColl.DeleteOne(ctx, bson.M{"id": delID})
-			}(id)
-		}
-		return true
+	if s.jobsColl != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		defer cancel()
+		_, _ = s.jobsColl.DeleteOne(ctx, bson.M{"id": id})
 	}
-	return false
+	return true
 }
 
 // SaveProfile creates or updates a saved connection profile in DB and local store.

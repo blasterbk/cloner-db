@@ -36,7 +36,9 @@ export const App: React.FC = () => {
     async function restoreActiveJob() {
       try {
         const savedJobId = localStorage.getItem('mongoclone_active_job_id');
-        if (savedJobId) {
+        const dismissedJobId = localStorage.getItem('mongoclone_dismissed_job_id');
+
+        if (savedJobId && savedJobId !== dismissedJobId) {
           try {
             const savedJob = await getJob(savedJobId);
             if (savedJob && (savedJob.status === 'RUNNING' || savedJob.status === 'PAUSED')) {
@@ -51,7 +53,7 @@ export const App: React.FC = () => {
         const jobs = await listJobs();
         if (jobs && jobs.length > 0) {
           const activeOrPaused = jobs.find(
-            (j) => j.status === 'RUNNING' || j.status === 'PAUSED'
+            (j) => (j.status === 'RUNNING' || j.status === 'PAUSED') && j.id !== dismissedJobId
           );
           if (activeOrPaused) {
             setActiveJob(activeOrPaused);
