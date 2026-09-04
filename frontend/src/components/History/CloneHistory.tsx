@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CloneJob } from '../../types';
-import { listJobs, deleteJob } from '../../api/client';
+import { listJobs, deleteJob, resumeJob } from '../../api/client';
 import { StatusBadge } from '../Common/StatusBadge';
 import { MetricCard } from '../Common/MetricCard';
 import {
@@ -21,6 +21,8 @@ import {
   Activity,
   ArrowRight,
   ArrowLeft,
+  Play,
+  RotateCcw,
 } from 'lucide-react';
 
 interface CloneHistoryProps {
@@ -289,6 +291,24 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
 
                 {/* Right: Actions */}
                 <div className="flex items-center gap-2.5 shrink-0 self-end lg:self-center">
+                  {(job.status === 'PAUSED' || job.status === 'CANCELLED' || job.status === 'FAILED') && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          await resumeJob(job.id);
+                          onSelectJob(job);
+                        } catch (e: any) {
+                          alert(`Failed to resume job: ${e.message}`);
+                        }
+                      }}
+                      className="px-3.5 py-2.5 rounded-xl text-xs font-bold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 transition-all flex items-center gap-1.5 shadow-sm"
+                      title="Resume migration from checkpoint"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-emerald-300" />
+                      <span>Resume</span>
+                    </button>
+                  )}
+
                   <button
                     onClick={() => setSelectedAuditJob(job)}
                     className="px-4 py-2.5 rounded-xl text-xs font-bold bg-brand-500/15 hover:bg-brand-500/25 text-brand-400 border border-brand-500/30 transition-all flex items-center gap-1.5 shadow-sm"

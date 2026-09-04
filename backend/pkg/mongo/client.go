@@ -30,11 +30,17 @@ func Connect(ctx context.Context, cfg *EndpointConfig) (*mongo.Client, error) {
 	effectiveURI := cfg.GetEffectiveURI()
 	clientOpts := options.Client().ApplyURI(effectiveURI)
 
-	// Set connection pooling and connect timeout
+	// Set connection pooling, NAT-safe timeouts, and automated retries
 	timeout := cfg.GetTimeout()
 	clientOpts.SetConnectTimeout(timeout)
 	clientOpts.SetServerSelectionTimeout(timeout)
-	clientOpts.SetSocketTimeout(60 * time.Minute) // Long socket timeout for streaming
+	// 45s socket timeout ensures NAT gateway connection drops fail fast and trigger instant auto-reconnection
+	clientOpts.SetSocketTimeout(45 * time.Second)
+	// 30s idle time recycles pooled connections before cloud NAT gateways (e.g. AWS 350s) drop silent idle sockets
+	clientOpts.SetMaxConnIdleTime(30 * time.Second)
+	clientOpts.SetHeartbeatInterval(10 * time.Second)
+	clientOpts.SetRetryReads(true)
+	clientOpts.SetRetryWrites(true)
 	clientOpts.SetMaxPoolSize(100)
 	clientOpts.SetMinPoolSize(5)
 

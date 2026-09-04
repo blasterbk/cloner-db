@@ -27,9 +27,10 @@ type Orchestrator struct {
 	hub           *ws.Hub
 	checkpointMgr *CheckpointManager
 
-	// Active running job cancel funcs
+	// Active running job cancel funcs & pause state
 	mu          sync.Mutex
 	cancelFuncs map[string]context.CancelFunc
+	pausedJobs  map[string]bool
 }
 
 // NewOrchestrator creates a new Orchestrator instance.
@@ -46,6 +47,7 @@ func NewOrchestrator(store *jobs.Store, hub *ws.Hub, dataDir string) *Orchestrat
 		hub:           hub,
 		checkpointMgr: NewCheckpointManager(dataDir, checkColl),
 		cancelFuncs:   make(map[string]context.CancelFunc),
+		pausedJobs:    make(map[string]bool),
 	}
 }
 
@@ -55,6 +57,7 @@ func (o *Orchestrator) StartJob(job *types.CloneJob) {
 
 	o.mu.Lock()
 	o.cancelFuncs[job.ID] = cancel
+	delete(o.pausedJobs, job.ID)
 	o.mu.Unlock()
 
 	go func() {
@@ -69,7 +72,28 @@ func (o *Orchestrator) StartJob(job *types.CloneJob) {
 	}()
 }
 
-// ResumeJob resumes a previously interrupted, cancelled, or failed clone job from its checkpoint.
+// PauseJob pauses an active running clone job and preserves its progress checkpoint.
+func (o *Orchestrator) PauseJob(jobID string) bool {
+	o.mu.Lock()
+	cancel, ok := o.cancelFuncs[jobID]
+	if ok {
+		o.pausedJobs[jobID] = true
+	}
+	o.mu.Unlock()
+
+	if ok {
+		if job, found := o.store.GetJob(jobID); found {
+			job.SetStatus(types.StatusPaused)
+			job.AddLog("INFO", "⏸️ Job paused by user. Progress and checkpoints saved. Ready to resume anytime.")
+			o.broadcastUpdate(job)
+		}
+		cancel()
+		return true
+	}
+	return false
+}
+
+// ResumeJob resumes a previously paused, interrupted, cancelled, or failed clone job from its checkpoint.
 func (o *Orchestrator) ResumeJob(jobID string) (bool, error) {
 	job, found := o.store.GetJob(jobID)
 	if !found {
@@ -81,6 +105,7 @@ func (o *Orchestrator) ResumeJob(jobID string) (bool, error) {
 		o.mu.Unlock()
 		return false, fmt.Errorf("job %s is already running", jobID)
 	}
+	delete(o.pausedJobs, jobID)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	o.cancelFuncs[jobID] = cancel
@@ -90,6 +115,7 @@ func (o *Orchestrator) ResumeJob(jobID string) (bool, error) {
 		defer func() {
 			o.mu.Lock()
 			delete(o.cancelFuncs, jobID)
+			delete(o.pausedJobs, jobID)
 			o.mu.Unlock()
 			cancel()
 		}()
@@ -104,6 +130,7 @@ func (o *Orchestrator) ResumeJob(jobID string) (bool, error) {
 func (o *Orchestrator) CancelJob(jobID string) bool {
 	o.mu.Lock()
 	cancel, ok := o.cancelFuncs[jobID]
+	delete(o.pausedJobs, jobID)
 	o.mu.Unlock()
 
 	if ok {
@@ -476,6 +503,10 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 					OnBatchCommitted: func(lastID any, docsInBatch int64, bytesInBatch int64) {
 						o.checkpointMgr.UpdateBatchProgress(job.ID, collKey, lastID, docsInBatch, bytesInBatch)
 					},
+					LogCallback: func(level, msg string) {
+						job.AddLog(level, msg)
+						o.broadcastUpdate(job)
+					},
 				})
 
 				res, err := copier.CopyCollection(ctx, item.SourceDB, item.SourceColl, item.TargetDB, item.TargetColl, item.Detail.DocCount)
@@ -503,8 +534,17 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	wg.Wait()
 
 	if ctx.Err() != nil {
-		job.SetStatus(types.StatusCancelled)
-		job.AddLog("WARN", "Job execution was paused/cancelled. Checkpoint saved for resume.")
+		o.mu.Lock()
+		isPaused := o.pausedJobs[job.ID]
+		o.mu.Unlock()
+
+		if isPaused {
+			job.SetStatus(types.StatusPaused)
+			job.AddLog("INFO", "⏸️ Job execution paused. Checkpoint saved. Click Resume to continue.")
+		} else {
+			job.SetStatus(types.StatusCancelled)
+			job.AddLog("WARN", "Job execution was cancelled. Checkpoint saved for resume.")
+		}
 		o.broadcastUpdate(job)
 		return
 	}

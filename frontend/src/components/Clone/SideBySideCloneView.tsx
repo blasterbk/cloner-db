@@ -7,7 +7,7 @@ import {
   OplogWindow,
   SavedProfile,
 } from '../../types';
-import { resumeJob, fetchOplogWindow, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, startCloneJob, cancelJob, fetchCatalog } from '../../api/client';
+import { resumeJob, pauseJob, fetchOplogWindow, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, startCloneJob, cancelJob, fetchCatalog } from '../../api/client';
 import { MetricCard } from '../Common/MetricCard';
 import { StatusBadge } from '../Common/StatusBadge';
 import confetti from 'canvas-confetti';
@@ -33,6 +33,8 @@ import {
   Trash2,
   ArrowRightLeft,
   RefreshCw,
+  Pause,
+  Play,
 } from 'lucide-react';
 
 export interface ProdDatabaseItem {
@@ -506,6 +508,7 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
   }
 
   const [resuming, setResuming] = useState(false);
+  const [pausing, setPausing] = useState(false);
 
   async function handleResume() {
     if (!activeJob) return;
@@ -516,6 +519,18 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
       alert(`Failed to resume clone: ${e.message}`);
     } finally {
       setResuming(false);
+    }
+  }
+
+  async function handlePause() {
+    if (!activeJob) return;
+    setPausing(true);
+    try {
+      await pauseJob(activeJob.id);
+    } catch (e: any) {
+      alert(`Failed to pause clone: ${e.message}`);
+    } finally {
+      setPausing(false);
     }
   }
 
@@ -540,6 +555,8 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
   }
 
   const isRunning = activeJob && activeJob.status === 'RUNNING';
+  const isPaused = activeJob && activeJob.status === 'PAUSED';
+  const isInterrupted = activeJob && (activeJob.status === 'CANCELLED' || activeJob.status === 'FAILED');
 
   return (
     <div className="space-y-3.5 max-w-7xl mx-auto animate-in fade-in duration-200">
@@ -589,18 +606,71 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
             </div>
             <div className="flex items-center gap-2">
               {isRunning ? (
-                <button
-                  onClick={handleCancel}
-                  disabled={cancelling}
-                  className="px-3 py-1 rounded-lg text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1"
-                >
-                  <StopCircle className="w-3.5 h-3.5" />
-                  <span>{cancelling ? 'Stopping...' : 'Cancel'}</span>
-                </button>
+                <>
+                  <button
+                    onClick={handlePause}
+                    disabled={pausing}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 flex items-center gap-1.5 transition-all shadow-sm"
+                    title="Pause cloning progress at current checkpoint"
+                  >
+                    <Pause className="w-3.5 h-3.5" />
+                    <span>{pausing ? 'Pausing...' : 'Pause'}</span>
+                  </button>
+
+                  <button
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5 transition-all"
+                  >
+                    <StopCircle className="w-3.5 h-3.5" />
+                    <span>{cancelling ? 'Stopping...' : 'Cancel'}</span>
+                  </button>
+                </>
+              ) : isPaused ? (
+                <>
+                  <button
+                    onClick={handleResume}
+                    disabled={resuming}
+                    className="px-4 py-1.5 rounded-lg text-xs font-bold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5 transition-all shadow-md shadow-emerald-500/10 animate-pulse"
+                    title="Resume cloning from saved checkpoint"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-emerald-300" />
+                    <span>{resuming ? 'Resuming...' : 'Resume Cloning'}</span>
+                  </button>
+
+                  <button
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5 transition-all"
+                  >
+                    <StopCircle className="w-3.5 h-3.5" />
+                    <span>Cancel</span>
+                  </button>
+                </>
+              ) : isInterrupted ? (
+                <>
+                  <button
+                    onClick={handleResume}
+                    disabled={resuming}
+                    className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5 transition-all"
+                    title="Resume migration from last checkpoint"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>{resuming ? 'Resuming...' : 'Resume from Checkpoint'}</span>
+                  </button>
+
+                  <button
+                    onClick={() => setActiveJob(null)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Configure New Run</span>
+                  </button>
+                </>
               ) : (
                 <button
                   onClick={() => setActiveJob(null)}
-                  className="px-3 py-1 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 flex items-center gap-1"
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 flex items-center gap-1"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                   <span>Configure New Run</span>
@@ -1374,24 +1444,65 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2.5 shrink-0">
+          {isRunning ? (
+            <>
+              <button
+                onClick={handlePause}
+                disabled={pausing}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 transition-all shadow-sm"
+              >
+                <Pause className="w-3.5 h-3.5" />
+                <span>{pausing ? 'Pausing...' : 'Pause Cloning'}</span>
+              </button>
 
-          <button
-            onClick={onBack}
-            className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-950/80 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 transition-colors"
-          >
-            Cancel
-          </button>
+              <button
+                onClick={handleCancel}
+                disabled={cancelling}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 transition-colors"
+              >
+                {cancelling ? 'Stopping...' : 'Cancel'}
+              </button>
+            </>
+          ) : isPaused ? (
+            <>
+              <button
+                onClick={handleResume}
+                disabled={resuming}
+                className="flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl text-xs font-black bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 hover:brightness-110 shadow-lg shadow-emerald-500/25 transition-all"
+              >
+                <Play className="w-3.5 h-3.5 fill-slate-950" />
+                <span>{resuming ? 'Resuming...' : 'Resume Migration'}</span>
+              </button>
 
-          <button
-            onClick={handleLaunch}
-            disabled={launching || isRunning || selectedCollections.length === 0 || !targetDbName.trim()}
-            className="flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl text-xs font-black bg-gradient-to-r from-brand-500 via-brand-400 to-emerald-400 text-slate-950 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-brand-500/25 transition-all"
-          >
-            <Zap className="w-3.5 h-3.5 fill-slate-950" />
-            <span>
-              {launching ? 'Starting Migration...' : isRunning ? 'Migration Running...' : 'Start Cloning Now'}
-            </span>
-          </button>
+              <button
+                onClick={handleCancel}
+                disabled={cancelling}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-950/80 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 transition-colors"
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={onBack}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-950/80 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 transition-colors"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={handleLaunch}
+                disabled={launching || selectedCollections.length === 0 || !targetDbName.trim()}
+                className="flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl text-xs font-black bg-gradient-to-r from-brand-500 via-brand-400 to-emerald-400 text-slate-950 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-brand-500/25 transition-all"
+              >
+                <Zap className="w-3.5 h-3.5 fill-slate-950" />
+                <span>
+                  {launching ? 'Starting Migration...' : 'Start Cloning Now'}
+                </span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 

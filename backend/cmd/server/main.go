@@ -345,6 +345,18 @@ func main() {
 			return
 		}
 
+		// Pause action: /api/v1/jobs/{id}/pause
+		if len(parts) > 1 && parts[1] == "pause" {
+			if r.Method != "POST" {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			paused := orchestrator.PauseJob(jobID)
+			jsonResponse(w, http.StatusOK, map[string]bool{"paused": paused})
+			return
+		}
+
+		// Resume action: /api/v1/jobs/{id}/resume
 		if len(parts) > 1 && parts[1] == "resume" {
 			if r.Method != "POST" {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

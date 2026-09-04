@@ -105,6 +105,14 @@ export async function cancelJob(id: string): Promise<boolean> {
   return data.cancelled;
 }
 
+export async function pauseJob(id: string): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/jobs/${id}/pause`, {
+    method: 'POST',
+  });
+  const data = await res.json();
+  return data.paused;
+}
+
 export async function deleteJob(id: string): Promise<boolean> {
   const res = await fetch(`${API_BASE}/jobs/${id}`, {
     method: 'DELETE',

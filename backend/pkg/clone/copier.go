@@ -20,6 +20,9 @@ type ProgressCallback func(p types.CollectionCopyProgress)
 // BatchCommitCallback is invoked after a batch of documents is written to the target.
 type BatchCommitCallback func(lastID any, docsInBatch int64, bytesInBatch int64)
 
+// LogCallback sends formatted progress log messages to the orchestrator audit trail.
+type LogCallback func(level, msg string)
+
 // CopierOptions defines options for the batch streaming copier.
 type CopierOptions struct {
 	BatchSize        int
@@ -30,6 +33,7 @@ type CopierOptions struct {
 	FilterQuery      bson.M              // Optional custom query filter
 	ProgressCallback ProgressCallback
 	OnBatchCommitted BatchCommitCallback // Callback for persistence/checkpointing
+	LogCallback      LogCallback         // Forward audit/retry diagnostics to job log
 }
 
 // BatchCopier handles high-throughput document streaming from source to target.
@@ -60,7 +64,8 @@ type docBatch struct {
 	lastID    any
 }
 
-// CopyCollection streams documents using a high-throughput multi-worker parallel ingestion pipeline.
+// CopyCollection streams documents using a high-throughput multi-worker parallel ingestion pipeline
+// with automated reconnection and retry resilience against NAT gateway stalls and network drops.
 func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, targetDB, targetColl string, estimatedCount int64) (*types.CollectionCopyProgress, error) {
 	progress := &types.CollectionCopyProgress{
 		DatabaseName:     sourceDB,
@@ -73,39 +78,18 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 	sourceCollRef := c.sourceClient.Database(sourceDB).Collection(sourceColl)
 	targetCollRef := c.targetClient.Database(targetDB).Collection(targetColl)
 
+	logMsg := func(level, msg string) {
+		if c.opts.LogCallback != nil {
+			c.opts.LogCallback(level, msg)
+		}
+	}
+
 	// 1. Drop target collection only if configured AND we are NOT resuming an interrupted job
 	if c.opts.DropTargetFirst && c.opts.ResumeFromID == nil {
 		_ = targetCollRef.Drop(ctx)
 	}
 
-	// 2. Open source cursor with optimized pre-fetch batch size and deterministic _id sort
-	filter := bson.M{}
-	if len(c.opts.FilterQuery) > 0 {
-		filter = c.opts.FilterQuery
-	}
-
-	if c.opts.ResumeFromID != nil {
-		resumeFilter := bson.M{"_id": bson.M{"$gt": c.opts.ResumeFromID}}
-		if len(filter) > 0 {
-			filter = bson.M{"$and": []bson.M{filter, resumeFilter}}
-		} else {
-			filter = resumeFilter
-		}
-	}
-
-	findOpts := options.Find().
-		SetBatchSize(int32(c.opts.BatchSize)).
-		SetSort(bson.D{{Key: "_id", Value: 1}}).
-		SetNoCursorTimeout(true)
-
-	cursor, err := sourceCollRef.Find(ctx, filter, findOpts)
-	if err != nil {
-		progress.Error = err.Error()
-		return progress, fmt.Errorf("failed to open find cursor on %s.%s: %w", sourceDB, sourceColl, err)
-	}
-	defer cursor.Close(ctx)
-
-	// 3. Multi-worker buffered channel pipeline
+	// 2. Multi-worker buffered channel pipeline
 	numWorkers := c.opts.NumWorkers
 	if numWorkers <= 0 {
 		numWorkers = 4
@@ -117,7 +101,7 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 	var workerWg sync.WaitGroup
 	var callbackMu sync.Mutex
 
-	// Worker Pool: Concurrent Ingestion into Target MongoDB
+	// Worker Pool: Concurrent Ingestion into Target MongoDB with automated transient write retries
 	for w := 0; w < numWorkers; w++ {
 		workerWg.Add(1)
 		go func() {
@@ -129,12 +113,56 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 					continue
 				}
 
-				res, err := targetCollRef.InsertMany(ctx, batch.docs, insertOpts)
-				insertedLen := int64(len(batch.docs))
-				if res != nil {
-					insertedLen = int64(len(res.InsertedIDs))
-				} else if err != nil {
-					// Some documents might still have inserted in unordered mode
+				var insertedLen int64
+				maxWriteAttempts := 5
+				var lastErr error
+
+				for attempt := 1; attempt <= maxWriteAttempts; attempt++ {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					writeCtx, writeCancel := context.WithTimeout(ctx, 40*time.Second)
+					res, err := targetCollRef.InsertMany(writeCtx, batch.docs, insertOpts)
+					writeCancel()
+
+					if err == nil {
+						if res != nil {
+							insertedLen = int64(len(res.InsertedIDs))
+						} else {
+							insertedLen = int64(len(batch.docs))
+						}
+						lastErr = nil
+						break
+					}
+
+					lastErr = err
+					// If duplicate key error in unordered insert, partial documents were still inserted
+					if mongo.IsDuplicateKeyError(err) {
+						if res != nil {
+							insertedLen = int64(len(res.InsertedIDs))
+						} else {
+							insertedLen = int64(len(batch.docs))
+						}
+						lastErr = nil
+						break
+					}
+
+					if attempt < maxWriteAttempts {
+						backoff := time.Duration(attempt*500) * time.Millisecond
+						logMsg("WARN", fmt.Sprintf("[Target Retry] Transient write stall on %s.%s (attempt %d/%d): %v. Retrying in %v...", targetDB, targetColl, attempt, maxWriteAttempts, err, backoff))
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(backoff):
+						}
+					}
+				}
+
+				if lastErr != nil && ctx.Err() == nil {
+					logMsg("ERROR", fmt.Sprintf("[Target Write] %s.%s write had unrecovered errors after %d retries: %v", targetDB, targetColl, maxWriteAttempts, lastErr))
 				}
 
 				atomic.AddInt64(&transferredDocs, insertedLen)
@@ -193,13 +221,40 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		}
 	}()
 
-	// 4. Producer: Continuous stream reading from cursor
+	// 3. Producer: Resilient stream reading from cursor with automated reconnect on NAT drops
 	start := time.Now()
 	hasMasking := c.opts.Masker != nil && c.opts.Masker.HasRules(sourceDB, sourceColl)
+
+	openCursor := func(fromID any) (*mongo.Cursor, error) {
+		filter := bson.M{}
+		if len(c.opts.FilterQuery) > 0 {
+			filter = c.opts.FilterQuery
+		}
+
+		if fromID != nil {
+			resumeFilter := bson.M{"_id": bson.M{"$gt": fromID}}
+			if len(filter) > 0 {
+				filter = bson.M{"$and": []bson.M{filter, resumeFilter}}
+			} else {
+				filter = resumeFilter
+			}
+		}
+
+		findOpts := options.Find().
+			SetBatchSize(int32(c.opts.BatchSize)).
+			SetSort(bson.D{{Key: "_id", Value: 1}}).
+			SetNoCursorTimeout(true)
+
+		return sourceCollRef.Find(ctx, filter, findOpts)
+	}
+
+	var lastSentID any = c.opts.ResumeFromID
 	currentBatch := make([]any, 0, c.opts.BatchSize)
 	currentBatchBytes := int64(0)
+	maxStreamRetries := 8
+	retryCount := 0
 
-	for cursor.Next(ctx) {
+	for {
 		select {
 		case <-ctx.Done():
 			close(batchChan)
@@ -209,35 +264,129 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		default:
 		}
 
-		var doc bson.M
-		if err := cursor.Decode(&doc); err != nil {
+		cursor, err := openCursor(lastSentID)
+		if err != nil {
+			if ctx.Err() != nil {
+				close(batchChan)
+				close(stopProgress)
+				progress.Error = "cancelled"
+				return progress, ctx.Err()
+			}
+
+			retryCount++
+			if retryCount > maxStreamRetries {
+				close(batchChan)
+				close(stopProgress)
+				progress.Error = err.Error()
+				return progress, fmt.Errorf("failed opening cursor on %s.%s after %d retries: %w", sourceDB, sourceColl, maxStreamRetries, err)
+			}
+
+			backoff := time.Duration(retryCount*2) * time.Second
+			logMsg("WARN", fmt.Sprintf("[Auto-Retry] Cannot open cursor on %s.%s: %v. Reconnecting in %v (attempt %d/%d)...", sourceDB, sourceColl, err, backoff, retryCount, maxStreamRetries))
+			select {
+			case <-ctx.Done():
+				close(batchChan)
+				close(stopProgress)
+				return progress, ctx.Err()
+			case <-time.After(backoff):
+				continue
+			}
+		}
+
+		var streamErr error
+
+		for cursor.Next(ctx) {
+			retryCount = 0 // Reset retry count upon successfully receiving documents
+
+			var doc bson.M
+			if err := cursor.Decode(&doc); err != nil {
+				streamErr = fmt.Errorf("failed to decode document: %w", err)
+				break
+			}
+
+			rawBytes, _ := bson.Marshal(doc)
+			currentBatchBytes += int64(len(rawBytes))
+
+			if hasMasking {
+				doc = c.opts.Masker.MaskDocument(sourceDB, sourceColl, doc)
+			}
+
+			currentBatch = append(currentBatch, doc)
+
+			if len(currentBatch) >= c.opts.BatchSize {
+				var lastID any
+				if lastDoc, ok := currentBatch[len(currentBatch)-1].(bson.M); ok {
+					lastID = lastDoc["_id"]
+				}
+				if lastID != nil {
+					lastSentID = lastID
+				}
+				batchChan <- docBatch{
+					docs:      currentBatch,
+					byteCount: currentBatchBytes,
+					lastID:    lastID,
+				}
+				currentBatch = make([]any, 0, c.opts.BatchSize)
+				currentBatchBytes = 0
+			}
+		}
+
+		if streamErr == nil {
+			streamErr = cursor.Err()
+		}
+		cursor.Close(ctx)
+
+		if ctx.Err() != nil {
 			close(batchChan)
 			close(stopProgress)
-			return progress, fmt.Errorf("failed to decode document: %w", err)
+			progress.Error = "cancelled"
+			return progress, ctx.Err()
 		}
 
-		rawBytes, _ := bson.Marshal(doc)
-		currentBatchBytes += int64(len(rawBytes))
-
-		if hasMasking {
-			doc = c.opts.Masker.MaskDocument(sourceDB, sourceColl, doc)
-		}
-
-		currentBatch = append(currentBatch, doc)
-
-		if len(currentBatch) >= c.opts.BatchSize {
-			var lastID any
-			if lastDoc, ok := currentBatch[len(currentBatch)-1].(bson.M); ok {
-				lastID = lastDoc["_id"]
+		if streamErr != nil {
+			// Network drop, NAT stall, or socket timeout occurred
+			// Flush any accumulated documents before reconnecting
+			if len(currentBatch) > 0 {
+				var lastID any
+				if lastDoc, ok := currentBatch[len(currentBatch)-1].(bson.M); ok {
+					lastID = lastDoc["_id"]
+				}
+				if lastID != nil {
+					lastSentID = lastID
+				}
+				batchChan <- docBatch{
+					docs:      currentBatch,
+					byteCount: currentBatchBytes,
+					lastID:    lastID,
+				}
+				currentBatch = make([]any, 0, c.opts.BatchSize)
+				currentBatchBytes = 0
 			}
-			batchChan <- docBatch{
-				docs:      currentBatch,
-				byteCount: currentBatchBytes,
-				lastID:    lastID,
+
+			retryCount++
+			if retryCount > maxStreamRetries {
+				close(batchChan)
+				close(stopProgress)
+				progress.Error = streamErr.Error()
+				return progress, fmt.Errorf("stream error on %s.%s after %d retries: %w", sourceDB, sourceColl, maxStreamRetries, streamErr)
 			}
-			currentBatch = make([]any, 0, c.opts.BatchSize)
-			currentBatchBytes = 0
+
+			backoff := time.Duration(retryCount*2) * time.Second
+			logMsg("WARN", fmt.Sprintf("[Auto-Retry] ⚡ Network stall / NAT connection drop on %s.%s: %v. Auto-reconnecting from last _id in %v (attempt %d/%d)...",
+				sourceDB, sourceColl, streamErr, backoff, retryCount, maxStreamRetries))
+
+			select {
+			case <-ctx.Done():
+				close(batchChan)
+				close(stopProgress)
+				return progress, ctx.Err()
+			case <-time.After(backoff):
+				continue // Re-open cursor from lastSentID and resume streaming
+			}
 		}
+
+		// Cursor exhausted with no errors
+		break
 	}
 
 	// Push remaining documents
@@ -256,11 +405,6 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 	close(batchChan)
 	workerWg.Wait()
 	close(stopProgress)
-
-	if err := cursor.Err(); err != nil {
-		progress.Error = err.Error()
-		return progress, fmt.Errorf("cursor error on %s.%s: %w", sourceDB, sourceColl, err)
-	}
 
 	// Final summary calculation
 	totalDocs := atomic.LoadInt64(&transferredDocs)
