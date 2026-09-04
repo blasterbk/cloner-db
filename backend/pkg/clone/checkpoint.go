@@ -36,11 +36,37 @@ type JobCheckpoint struct {
 	Collections map[string]*CollectionCheckpoint `json:"collections" bson:"collections"`
 }
 
+// Clone creates an isolated, deep copy of JobCheckpoint safe for background serialization.
+func (cp *JobCheckpoint) Clone() *JobCheckpoint {
+	if cp == nil {
+		return nil
+	}
+	newCp := &JobCheckpoint{
+		JobID:     cp.JobID,
+		CreatedAt: cp.CreatedAt,
+		UpdatedAt: cp.UpdatedAt,
+	}
+	if cp.Collections != nil {
+		newCp.Collections = make(map[string]*CollectionCheckpoint, len(cp.Collections))
+		for k, v := range cp.Collections {
+			if v != nil {
+				vCopy := *v
+				newCp.Collections[k] = &vCopy
+			}
+		}
+	} else {
+		newCp.Collections = make(map[string]*CollectionCheckpoint)
+	}
+	return newCp
+}
+
 // CheckpointManager handles thread-safe persistence of job checkpoints in MongoDB and local cache.
 type CheckpointManager struct {
 	mu        sync.RWMutex
+	saveMu    sync.Mutex
 	dir       string
 	inMem     map[string]*JobCheckpoint
+	lastSaved map[string]time.Time
 	checkColl *mongo.Collection
 }
 
@@ -51,6 +77,7 @@ func NewCheckpointManager(dataDir string, checkColl *mongo.Collection) *Checkpoi
 	return &CheckpointManager{
 		dir:       dir,
 		inMem:     make(map[string]*JobCheckpoint),
+		lastSaved: make(map[string]time.Time),
 		checkColl: checkColl,
 	}
 }
@@ -75,7 +102,7 @@ func (cm *CheckpointManager) GetOrCreateCheckpoint(jobID string) *JobCheckpoint 
 				cp.Collections = make(map[string]*CollectionCheckpoint)
 			}
 			cm.inMem[jobID] = &cp
-			_ = cm.saveToDisk(&cp)
+			cm.saveCheckpointLocked(&cp, true)
 			return &cp
 		}
 	}
@@ -102,8 +129,37 @@ func (cm *CheckpointManager) GetOrCreateCheckpoint(jobID string) *JobCheckpoint 
 		Collections: make(map[string]*CollectionCheckpoint),
 	}
 	cm.inMem[jobID] = cp
-	_ = cm.saveCheckpoint(cp)
+	cm.saveCheckpointLocked(cp, true)
 	return cp
+}
+
+// GetCollectionCheckpoint safely returns a copy of a single collection checkpoint.
+func (cm *CheckpointManager) GetCollectionCheckpoint(jobID, collKey string) *CollectionCheckpoint {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	cp, ok := cm.inMem[jobID]
+	if !ok {
+		return nil
+	}
+	ccp, ok := cp.Collections[collKey]
+	if !ok || ccp == nil {
+		return nil
+	}
+	copy := *ccp
+	return &copy
+}
+
+// GetJobCheckpointSnapshot safely returns an isolated deep clone of the entire job checkpoint.
+func (cm *CheckpointManager) GetJobCheckpointSnapshot(jobID string) *JobCheckpoint {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	cp, ok := cm.inMem[jobID]
+	if !ok {
+		return nil
+	}
+	return cp.Clone()
 }
 
 // InitCollection registers a planned collection into the checkpoint if not already present.
@@ -126,11 +182,11 @@ func (cm *CheckpointManager) InitCollection(jobID, collKey, srcDB, srcColl, tgtD
 			TotalDocs:  totalDocs,
 			UpdatedAt:  time.Now().UTC(),
 		}
-		_ = cm.saveCheckpoint(cp)
+		cm.saveCheckpointLocked(cp, true)
 	}
 }
 
-// UpdateBatchProgress records progress and the latest monotonic _id for a collection.
+// UpdateBatchProgress records progress and the latest monotonic _id for a collection with throttled persistence.
 func (cm *CheckpointManager) UpdateBatchProgress(jobID, collKey string, lastID any, incDocs, incBytes int64) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -154,7 +210,7 @@ func (cm *CheckpointManager) UpdateBatchProgress(jobID, collKey string, lastID a
 	collCp.UpdatedAt = time.Now().UTC()
 	cp.UpdatedAt = time.Now().UTC()
 
-	_ = cm.saveCheckpoint(cp)
+	cm.saveCheckpointLocked(cp, false)
 }
 
 // MarkCollectionCompleted records that a collection has finished transferring all documents.
@@ -182,24 +238,56 @@ func (cm *CheckpointManager) MarkCollectionCompleted(jobID, collKey string, fina
 	collCp.UpdatedAt = time.Now().UTC()
 	cp.UpdatedAt = time.Now().UTC()
 
-	_ = cm.saveCheckpoint(cp)
+	cm.saveCheckpointLocked(cp, true)
 }
 
-func (cm *CheckpointManager) saveCheckpoint(cp *JobCheckpoint) error {
-	// 1. Save to disk cache
-	_ = cm.saveToDisk(cp)
+// saveCheckpointLocked persists the checkpoint using an isolated snapshot. Must be called while holding cm.mu.
+func (cm *CheckpointManager) saveCheckpointLocked(cp *JobCheckpoint, force bool) {
+	if !force {
+		if last, ok := cm.lastSaved[cp.JobID]; ok && time.Since(last) < 1500*time.Millisecond {
+			return
+		}
+	}
+	cm.lastSaved[cp.JobID] = time.Now()
+	snapshot := cp.Clone()
 
-	// 2. Persist to MongoDB collection mongoclone_checkpoints
-	if cm.checkColl != nil {
-		go func(item JobCheckpoint) {
+	go func(item *JobCheckpoint) {
+		cm.saveMu.Lock()
+		defer cm.saveMu.Unlock()
+
+		_ = cm.saveToDisk(item)
+
+		if cm.checkColl != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			opts := options.Replace().SetUpsert(true)
 			_, _ = cm.checkColl.ReplaceOne(ctx, bson.M{"job_id": item.JobID}, item, opts)
-		}(*cp)
-	}
+		}
+	}(snapshot)
+}
 
-	return nil
+// FlushCheckpoint forces a synchronous, guaranteed save of the checkpoint to disk and MongoDB.
+func (cm *CheckpointManager) FlushCheckpoint(jobID string) {
+	cm.mu.Lock()
+	cp, ok := cm.inMem[jobID]
+	if !ok {
+		cm.mu.Unlock()
+		return
+	}
+	cm.lastSaved[jobID] = time.Now()
+	snapshot := cp.Clone()
+	cm.mu.Unlock()
+
+	cm.saveMu.Lock()
+	defer cm.saveMu.Unlock()
+
+	_ = cm.saveToDisk(snapshot)
+	if cm.checkColl != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		opts := options.Replace().SetUpsert(true)
+		_, _ = cm.checkColl.ReplaceOne(ctx, bson.M{"job_id": snapshot.JobID}, snapshot, opts)
+	}
 }
 
 func (cm *CheckpointManager) saveToDisk(cp *JobCheckpoint) error {
@@ -221,6 +309,7 @@ func (cm *CheckpointManager) DeleteCheckpoint(jobID string) {
 	defer cm.mu.Unlock()
 
 	delete(cm.inMem, jobID)
+	delete(cm.lastSaved, jobID)
 	filePath := filepath.Join(cm.dir, fmt.Sprintf("%s.json", jobID))
 	_ = os.Remove(filePath)
 

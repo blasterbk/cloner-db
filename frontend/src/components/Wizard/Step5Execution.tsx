@@ -59,8 +59,8 @@ export const Step5Execution: React.FC<Step5ExecutionProps> = ({
     setCancelling(true);
     try {
       await cancelJob(activeJob.id);
-    } catch (e) {
-      // ignore
+    } catch (e: any) {
+      alert(`Failed to cancel clone: ${e.message || e}`);
     } finally {
       setCancelling(false);
     }

@@ -513,10 +513,12 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
   async function handleResume() {
     if (!activeJob) return;
     setResuming(true);
+    setActiveJob((prev) => (prev ? { ...prev, status: 'RUNNING' } : null));
     try {
       await resumeJob(activeJob.id);
     } catch (e: any) {
-      alert(`Failed to resume clone: ${e.message}`);
+      alert(`Failed to resume clone: ${e.message || e}`);
+      setActiveJob((prev) => (prev ? { ...prev, status: 'PAUSED' } : null));
     } finally {
       setResuming(false);
     }
@@ -525,10 +527,12 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
   async function handlePause() {
     if (!activeJob) return;
     setPausing(true);
+    setActiveJob((prev) => (prev ? { ...prev, status: 'PAUSED' } : null));
     try {
       await pauseJob(activeJob.id);
     } catch (e: any) {
-      alert(`Failed to pause clone: ${e.message}`);
+      alert(`Failed to pause clone: ${e.message || e}`);
+      setActiveJob((prev) => (prev ? { ...prev, status: 'RUNNING' } : null));
     } finally {
       setPausing(false);
     }
@@ -537,10 +541,11 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
   async function handleCancel() {
     if (!activeJob) return;
     setCancelling(true);
+    setActiveJob((prev) => (prev ? { ...prev, status: 'CANCELLED' } : null));
     try {
       await cancelJob(activeJob.id);
-    } catch (e) {
-      // ignore
+    } catch (e: any) {
+      alert(`Failed to cancel clone: ${e.message || e}`);
     } finally {
       setCancelling(false);
     }

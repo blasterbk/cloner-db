@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -100,6 +101,28 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 	var transferredBytes int64
 	var workerWg sync.WaitGroup
 	var callbackMu sync.Mutex
+	stopProgress := make(chan struct{})
+
+	var closeOnce sync.Once
+	stopPipeline := func() {
+		closeOnce.Do(func() {
+			close(batchChan)
+			close(stopProgress)
+		})
+	}
+	defer func() {
+		stopPipeline()
+		workerWg.Wait()
+	}()
+
+	sendBatch := func(b docBatch) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case batchChan <- b:
+			return true
+		}
+	}
 
 	// Worker Pool: Concurrent Ingestion into Target MongoDB with automated transient write retries
 	for w := 0; w < numWorkers; w++ {
@@ -176,7 +199,6 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 	}
 
 	// Dedicated Progress Telemetry Broadcaster (Runs every 400ms)
-	stopProgress := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(400 * time.Millisecond)
 		defer ticker.Stop()
@@ -232,7 +254,15 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		}
 
 		if fromID != nil {
-			resumeFilter := bson.M{"_id": bson.M{"$gt": fromID}}
+			normID := fromID
+			if m, ok := fromID.(map[string]any); ok {
+				if oidStr, hasOid := m["$oid"].(string); hasOid {
+					if objID, err := primitive.ObjectIDFromHex(oidStr); err == nil {
+						normID = objID
+					}
+				}
+			}
+			resumeFilter := bson.M{"_id": bson.M{"$gt": normID}}
 			if len(filter) > 0 {
 				filter = bson.M{"$and": []bson.M{filter, resumeFilter}}
 			} else {
@@ -257,8 +287,6 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 	for {
 		select {
 		case <-ctx.Done():
-			close(batchChan)
-			close(stopProgress)
 			progress.Error = "cancelled"
 			return progress, ctx.Err()
 		default:
@@ -267,16 +295,12 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		cursor, err := openCursor(lastSentID)
 		if err != nil {
 			if ctx.Err() != nil {
-				close(batchChan)
-				close(stopProgress)
 				progress.Error = "cancelled"
 				return progress, ctx.Err()
 			}
 
 			retryCount++
 			if retryCount > maxStreamRetries {
-				close(batchChan)
-				close(stopProgress)
 				progress.Error = err.Error()
 				return progress, fmt.Errorf("failed opening cursor on %s.%s after %d retries: %w", sourceDB, sourceColl, maxStreamRetries, err)
 			}
@@ -285,8 +309,7 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 			logMsg("WARN", fmt.Sprintf("[Auto-Retry] Cannot open cursor on %s.%s: %v. Reconnecting in %v (attempt %d/%d)...", sourceDB, sourceColl, err, backoff, retryCount, maxStreamRetries))
 			select {
 			case <-ctx.Done():
-				close(batchChan)
-				close(stopProgress)
+				progress.Error = "cancelled"
 				return progress, ctx.Err()
 			case <-time.After(backoff):
 				continue
@@ -321,10 +344,13 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 				if lastID != nil {
 					lastSentID = lastID
 				}
-				batchChan <- docBatch{
+				if !sendBatch(docBatch{
 					docs:      currentBatch,
 					byteCount: currentBatchBytes,
 					lastID:    lastID,
+				}) {
+					progress.Error = "cancelled"
+					return progress, ctx.Err()
 				}
 				currentBatch = make([]any, 0, c.opts.BatchSize)
 				currentBatchBytes = 0
@@ -337,8 +363,6 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		cursor.Close(ctx)
 
 		if ctx.Err() != nil {
-			close(batchChan)
-			close(stopProgress)
 			progress.Error = "cancelled"
 			return progress, ctx.Err()
 		}
@@ -354,10 +378,13 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 				if lastID != nil {
 					lastSentID = lastID
 				}
-				batchChan <- docBatch{
+				if !sendBatch(docBatch{
 					docs:      currentBatch,
 					byteCount: currentBatchBytes,
 					lastID:    lastID,
+				}) {
+					progress.Error = "cancelled"
+					return progress, ctx.Err()
 				}
 				currentBatch = make([]any, 0, c.opts.BatchSize)
 				currentBatchBytes = 0
@@ -365,8 +392,6 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 
 			retryCount++
 			if retryCount > maxStreamRetries {
-				close(batchChan)
-				close(stopProgress)
 				progress.Error = streamErr.Error()
 				return progress, fmt.Errorf("stream error on %s.%s after %d retries: %w", sourceDB, sourceColl, maxStreamRetries, streamErr)
 			}
@@ -377,8 +402,7 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 
 			select {
 			case <-ctx.Done():
-				close(batchChan)
-				close(stopProgress)
+				progress.Error = "cancelled"
 				return progress, ctx.Err()
 			case <-time.After(backoff):
 				continue // Re-open cursor from lastSentID and resume streaming
@@ -395,16 +419,18 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		if lastDoc, ok := currentBatch[len(currentBatch)-1].(bson.M); ok {
 			lastID = lastDoc["_id"]
 		}
-		batchChan <- docBatch{
+		if !sendBatch(docBatch{
 			docs:      currentBatch,
 			byteCount: currentBatchBytes,
 			lastID:    lastID,
+		}) {
+			progress.Error = "cancelled"
+			return progress, ctx.Err()
 		}
 	}
 
-	close(batchChan)
+	stopPipeline()
 	workerWg.Wait()
-	close(stopProgress)
 
 	// Final summary calculation
 	totalDocs := atomic.LoadInt64(&transferredDocs)

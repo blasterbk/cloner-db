@@ -187,6 +187,10 @@ func (s *Store) syncJobs(ctx context.Context) {
 			s.jobs = make(map[string]*types.CloneJob, len(dbJobs))
 			for _, j := range dbJobs {
 				copyJob := j
+				if copyJob.Status == types.StatusRunning {
+					copyJob.Status = types.StatusPaused
+					copyJob.AddLog("WARN", "Server restarted while clone was in progress. Job paused with checkpoint preserved. Ready to resume.")
+				}
 				s.jobs[j.ID] = &copyJob
 			}
 			s.mu.Unlock()
@@ -709,6 +713,12 @@ func (s *Store) load() {
 	if data, err := os.ReadFile(s.jobsFile); err == nil {
 		var loadedJobs map[string]*types.CloneJob
 		if err := json.Unmarshal(data, &loadedJobs); err == nil && len(loadedJobs) > 0 {
+			for _, j := range loadedJobs {
+				if j != nil && j.Status == types.StatusRunning {
+					j.Status = types.StatusPaused
+					j.AddLog("WARN", "Server restarted while clone was in progress. Job paused with checkpoint preserved. Ready to resume.")
+				}
+			}
 			s.jobs = loadedJobs
 		}
 	}

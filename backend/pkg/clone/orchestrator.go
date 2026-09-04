@@ -82,12 +82,15 @@ func (o *Orchestrator) PauseJob(jobID string) bool {
 	o.mu.Unlock()
 
 	if ok {
-		if job, found := o.store.GetJob(jobID); found {
-			job.SetStatus(types.StatusPaused)
-			job.AddLog("INFO", "⏸️ Job paused by user. Progress and checkpoints saved. Ready to resume anytime.")
-			o.broadcastUpdate(job)
-		}
 		cancel()
+	}
+
+	if job, found := o.store.GetJob(jobID); found {
+		job.SetStatus(types.StatusPaused)
+		job.AddLog("INFO", "⏸️ Job paused by user. Progress and checkpoints saved. Ready to resume anytime.")
+		o.checkpointMgr.FlushCheckpoint(jobID)
+		o.store.SaveJob(job)
+		o.broadcastUpdate(job)
 		return true
 	}
 	return false
@@ -135,11 +138,14 @@ func (o *Orchestrator) CancelJob(jobID string) bool {
 
 	if ok {
 		cancel()
-		if job, found := o.store.GetJob(jobID); found {
-			job.SetStatus(types.StatusCancelled)
-			job.AddLog("WARN", "Job execution was cancelled by user. Checkpoint preserved for resuming.")
-			o.broadcastUpdate(job)
-		}
+	}
+
+	if job, found := o.store.GetJob(jobID); found {
+		job.SetStatus(types.StatusCancelled)
+		job.AddLog("WARN", "Job execution was cancelled by user. Checkpoint preserved for resuming.")
+		o.checkpointMgr.FlushCheckpoint(jobID)
+		o.store.SaveJob(job)
+		o.broadcastUpdate(job)
 		return true
 	}
 	return false
@@ -347,7 +353,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	o.broadcastUpdate(job)
 
 	// Step 4: Checkpoint & Worker Pool Setup
-	cp := o.checkpointMgr.GetOrCreateCheckpoint(job.ID)
+	_ = o.checkpointMgr.GetOrCreateCheckpoint(job.ID)
 	for _, item := range plan {
 		collKey := fmt.Sprintf("%s.%s", item.SourceDB, item.SourceColl)
 		o.checkpointMgr.InitCollection(job.ID, collKey, item.SourceDB, item.SourceColl, item.TargetDB, item.TargetColl, item.Detail.DocCount)
@@ -381,16 +387,19 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 
 	// Sync existing progress from checkpoint if resuming
 	if isResuming {
-		for _, item := range plan {
-			collKey := fmt.Sprintf("%s.%s", item.SourceDB, item.SourceColl)
-			if ccp, ok := cp.Collections[collKey]; ok {
-				if ccp.Status == "completed" {
-					atomic.AddInt64(&completedCollsCount, 1)
-					atomic.AddInt64(&totalTransDocs, ccp.TransferredDocs)
-					atomic.AddInt64(&totalTransBytes, ccp.TransferredBytes)
-				} else if ccp.Status == "in_progress" {
-					atomic.AddInt64(&totalTransDocs, ccp.TransferredDocs)
-					atomic.AddInt64(&totalTransBytes, ccp.TransferredBytes)
+		cpSnapshot := o.checkpointMgr.GetJobCheckpointSnapshot(job.ID)
+		if cpSnapshot != nil {
+			for _, item := range plan {
+				collKey := fmt.Sprintf("%s.%s", item.SourceDB, item.SourceColl)
+				if ccp, ok := cpSnapshot.Collections[collKey]; ok {
+					if ccp.Status == "completed" {
+						atomic.AddInt64(&completedCollsCount, 1)
+						atomic.AddInt64(&totalTransDocs, ccp.TransferredDocs)
+						atomic.AddInt64(&totalTransBytes, ccp.TransferredBytes)
+					} else if ccp.Status == "in_progress" {
+						atomic.AddInt64(&totalTransDocs, ccp.TransferredDocs)
+						atomic.AddInt64(&totalTransBytes, ccp.TransferredBytes)
+					}
 				}
 			}
 		}
@@ -421,7 +430,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 				}
 
 				collKey := fmt.Sprintf("%s.%s", item.SourceDB, item.SourceColl)
-				collCp := cp.Collections[collKey]
+				collCp := o.checkpointMgr.GetCollectionCheckpoint(job.ID, collKey)
 
 				// If already completed in checkpoint, skip!
 				if collCp != nil && collCp.Status == "completed" {
@@ -508,6 +517,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 			job.SetStatus(types.StatusCancelled)
 			job.AddLog("WARN", "Job execution was cancelled. Checkpoint saved for resume.")
 		}
+		o.checkpointMgr.FlushCheckpoint(job.ID)
 		o.broadcastUpdate(job)
 		return
 	}
@@ -571,6 +581,7 @@ func (o *Orchestrator) failJob(job *types.CloneJob, errMsg string) {
 	job.Error = errMsg
 	job.SetStatus(types.StatusFailed)
 	job.AddLog("ERROR", errMsg)
+	o.checkpointMgr.FlushCheckpoint(job.ID)
 	o.broadcastUpdate(job)
 }
 
