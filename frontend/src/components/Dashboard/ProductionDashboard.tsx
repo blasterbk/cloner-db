@@ -107,6 +107,15 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
         new Map(dbList.map((item) => [`${item.name}-${item.clusterUri}`, item])).values()
       );
       setProdDatabases(uniqueDbs);
+
+      // Restore active database if one was saved
+      const savedDbName = localStorage.getItem('mongoclone_selected_db_name');
+      if (savedDbName) {
+        const match = uniqueDbs.find((d) => d.name.toLowerCase() === savedDbName.toLowerCase());
+        if (match) {
+          setSelectedDbForClone(match);
+        }
+      }
     } catch (e) {
       console.error('Failed to load production databases:', e);
       setProdDatabases([]);
@@ -114,6 +123,30 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       setRefreshing(false);
       setLoading(false);
     }
+  }
+
+  // Auto-select database matching activeJob if set (e.g. from page refresh or history resume)
+  useEffect(() => {
+    if (activeJob && (activeJob.status === 'RUNNING' || activeJob.status === 'PAUSED') && !selectedDbForClone && prodDatabases.length > 0) {
+      const srcDbName = activeJob.request?.databases?.[0]?.source_database;
+      if (srcDbName) {
+        const match = prodDatabases.find((d) => d.name.toLowerCase() === srcDbName.toLowerCase());
+        if (match) {
+          setSelectedDbForClone(match);
+          localStorage.setItem('mongoclone_selected_db_name', match.name);
+        }
+      }
+    }
+  }, [activeJob?.id, activeJob?.status, prodDatabases]);
+
+  function handleSelectDbForClone(item: ProdDatabaseItem) {
+    setSelectedDbForClone(item);
+    localStorage.setItem('mongoclone_selected_db_name', item.name);
+  }
+
+  function handleBackFromClone() {
+    setSelectedDbForClone(null);
+    localStorage.removeItem('mongoclone_selected_db_name');
   }
 
   async function handleTestNewConn() {
@@ -253,7 +286,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     return (
       <SideBySideCloneView
         db={selectedDbForClone}
-        onBack={() => setSelectedDbForClone(null)}
+        onBack={handleBackFromClone}
         activeJob={activeJob}
         setActiveJob={setActiveJob}
       />
@@ -299,6 +332,78 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
         </div>
       </div>
 
+      {/* Active / Paused Clone Alert Banner */}
+      {activeJob && (activeJob.status === 'RUNNING' || activeJob.status === 'PAUSED') && (
+        <div className={`p-3.5 sm:p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg animate-in slide-in-from-top-2 ${
+          activeJob.status === 'PAUSED'
+            ? 'bg-amber-950/30 border-amber-500/50 text-amber-200 shadow-amber-500/10'
+            : 'bg-cyan-950/30 border-cyan-500/50 text-cyan-200 shadow-cyan-500/10'
+        }`}>
+          <div className="flex items-center gap-3">
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-base border ${
+              activeJob.status === 'PAUSED'
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30 animate-pulse'
+            }`}>
+              {activeJob.status === 'PAUSED' ? '⏸️' : '⚡'}
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-xs sm:text-sm text-white font-mono">
+                  {activeJob.name}
+                </span>
+                <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold uppercase border ${
+                  activeJob.status === 'PAUSED'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 animate-pulse'
+                }`}>
+                  {activeJob.status === 'PAUSED' ? 'Paused Migration' : 'Cloning in Progress'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 font-mono mt-0.5">
+                {activeJob.source_masked} &rarr; {activeJob.target_masked} &bull; Progress:{' '}
+                <span className="font-bold text-white">{(activeJob.progress?.percent || 0).toFixed(1)}%</span>{' '}
+                ({(activeJob.progress?.transferred_docs || 0).toLocaleString()} / {(activeJob.progress?.total_estimated_docs || 0).toLocaleString()} docs)
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                const srcDbName = activeJob.request?.databases?.[0]?.source_database;
+                const match = prodDatabases.find(
+                  (d) => d.name.toLowerCase() === srcDbName?.toLowerCase()
+                );
+                if (match) {
+                  handleSelectDbForClone(match);
+                } else if (prodDatabases.length > 0) {
+                  handleSelectDbForClone({
+                    id: `active-${srcDbName}`,
+                    profileId: 'auto',
+                    name: srcDbName || 'Database',
+                    clusterName: 'Source Cluster',
+                    clusterUri: activeJob.request.source.uri || '',
+                    sizeBytes: activeJob.progress?.total_estimated_bytes || 0,
+                    totalCollections: activeJob.progress?.total_collections || 0,
+                    totalDocuments: activeJob.progress?.total_estimated_docs || 0,
+                    collections: [],
+                  });
+                }
+              }}
+              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-md transition-all ${
+                activeJob.status === 'PAUSED'
+                  ? 'bg-amber-500 text-slate-950 hover:bg-amber-400 shadow-amber-500/20'
+                  : 'bg-brand-500 text-slate-950 hover:bg-brand-400 shadow-brand-500/20'
+              }`}
+            >
+              <span>View Migration Screen</span>
+              <ArrowRight className="w-3.5 h-3.5 stroke-[2.5]" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Search and Action Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
         <div className="relative flex-1 max-w-md">
@@ -339,34 +444,68 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
-          {filtered.map((item) => (
-            <div
-              key={item.id}
-              onClick={() => setSelectedDbForClone(item)}
-              className="glass-panel p-3.5 rounded-2xl border border-slate-800/90 hover:border-brand-500/50 bg-slate-900/60 hover:bg-slate-900/90 transition-all cursor-pointer group hover:shadow-lg hover:shadow-brand-500/10 flex flex-col justify-between gap-3 relative"
-            >
-              {/* Top: DB Name & Actions */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center justify-center group-hover:scale-105 transition-transform">
-                      <Database className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-black text-white font-mono tracking-tight group-hover:text-brand-300 transition-colors">
-                        {item.name}
-                      </h3>
-                      <p className="text-[10px] text-slate-400 truncate max-w-[140px]">
-                        {item.clusterName}
-                      </p>
-                    </div>
-                  </div>
+          {filtered.map((item) => {
+            const isJobForDb = Boolean(
+              activeJob &&
+              activeJob.request?.databases?.some(
+                (d) => d.source_database.toLowerCase() === item.name.toLowerCase()
+              )
+            );
+            const isPausedForDb = isJobForDb && activeJob?.status === 'PAUSED';
+            const isRunningForDb = isJobForDb && activeJob?.status === 'RUNNING';
 
-                  <div className="flex items-center gap-1">
-                    <span className="flex items-center gap-1 text-[9px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Ready
-                    </span>
+            return (
+              <div
+                key={item.id}
+                onClick={() => handleSelectDbForClone(item)}
+                className={`glass-panel p-3.5 rounded-2xl border transition-all cursor-pointer group flex flex-col justify-between gap-3 relative ${
+                  isPausedForDb
+                    ? 'border-amber-500/60 bg-amber-950/20 shadow-lg shadow-amber-500/10 hover:border-amber-400'
+                    : isRunningForDb
+                    ? 'border-cyan-500/60 bg-cyan-950/20 shadow-lg shadow-cyan-500/10 hover:border-cyan-400'
+                    : 'border-slate-800/90 hover:border-brand-500/50 bg-slate-900/60 hover:bg-slate-900/90 hover:shadow-lg hover:shadow-brand-500/10'
+                }`}
+              >
+                {/* Top: DB Name & Actions */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center group-hover:scale-105 transition-transform ${
+                        isPausedForDb
+                          ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                          : isRunningForDb
+                          ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
+                          : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                      }`}>
+                        <Database className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-black text-white font-mono tracking-tight group-hover:text-brand-300 transition-colors">
+                          {item.name}
+                        </h3>
+                        <p className="text-[10px] text-slate-400 truncate max-w-[140px]">
+                          {item.clusterName}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      {isPausedForDb ? (
+                        <span className="flex items-center gap-1 text-[9px] font-bold text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full border border-amber-500/40 animate-pulse">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                          PAUSED ({(activeJob?.progress?.percent || 0).toFixed(0)}%)
+                        </span>
+                      ) : isRunningForDb ? (
+                        <span className="flex items-center gap-1 text-[9px] font-bold text-cyan-300 bg-cyan-500/20 px-2 py-0.5 rounded-full border border-cyan-500/40 animate-pulse">
+                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                          RUNNING ({(activeJob?.progress?.percent || 0).toFixed(0)}%)
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1 text-[9px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          Ready
+                        </span>
+                      )}
 
                     {/* Edit Option */}
                     <button
@@ -424,7 +563,8 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
                 </button>
               </div>
             </div>
-          ))}
+          );
+        })}
 
           {/* Quick Register Card */}
           <div

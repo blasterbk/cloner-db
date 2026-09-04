@@ -7,7 +7,7 @@ import {
   OplogWindow,
   SavedProfile,
 } from '../../types';
-import { resumeJob, pauseJob, fetchOplogWindow, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, startCloneJob, cancelJob, fetchCatalog } from '../../api/client';
+import { resumeJob, pauseJob, fetchOplogWindow, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, startCloneJob, cancelJob, fetchCatalog, listJobs } from '../../api/client';
 import { MetricCard } from '../Common/MetricCard';
 import { StatusBadge } from '../Common/StatusBadge';
 import confetti from 'canvas-confetti';
@@ -149,6 +149,34 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
   const [launching, setLaunching] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [refreshingTargetDb, setRefreshingTargetDb] = useState(false);
+
+  // Check if there is an active/paused job for this specific database on mount
+  useEffect(() => {
+    async function checkExistingJobForDb() {
+      if (
+        activeJob &&
+        activeJob.request?.databases?.some(
+          (d) => d.source_database.toLowerCase() === db.name.toLowerCase()
+        )
+      ) {
+        return;
+      }
+      try {
+        const jobs = await listJobs();
+        const found = jobs.find(
+          (j) =>
+            (j.status === 'RUNNING' || j.status === 'PAUSED') &&
+            j.request?.databases?.some(
+              (d) => d.source_database.toLowerCase() === db.name.toLowerCase()
+            )
+        );
+        if (found) {
+          setActiveJob(found);
+        }
+      } catch (e) {}
+    }
+    checkExistingJobForDb();
+  }, [db.name]);
 
   useEffect(() => {
     loadTargetProfiles();
@@ -559,9 +587,16 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  const isRunning = activeJob && activeJob.status === 'RUNNING';
-  const isPaused = activeJob && activeJob.status === 'PAUSED';
-  const isInterrupted = activeJob && (activeJob.status === 'CANCELLED' || activeJob.status === 'FAILED');
+  const isJobForThisDb = Boolean(
+    activeJob &&
+    activeJob.request?.databases?.some(
+      (d) => d.source_database.toLowerCase() === db.name.toLowerCase()
+    )
+  );
+
+  const isRunning = isJobForThisDb && activeJob?.status === 'RUNNING';
+  const isPaused = isJobForThisDb && activeJob?.status === 'PAUSED';
+  const isInterrupted = isJobForThisDb && (activeJob?.status === 'CANCELLED' || activeJob?.status === 'FAILED');
 
   return (
     <div className="space-y-3.5 max-w-7xl mx-auto animate-in fade-in duration-200">
@@ -600,7 +635,7 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
       </div>
 
       {/* LIVE PROGRESS VIEW (When Job is Active or Running) */}
-      {activeJob && (
+      {activeJob && isJobForThisDb && (
         <div className="glass-panel-glow p-4 rounded-2xl space-y-3 border border-brand-500/40 bg-slate-900/90 animate-in slide-in-from-top-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div className="flex items-center gap-2.5">

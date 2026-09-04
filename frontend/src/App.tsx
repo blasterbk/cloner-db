@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CloneJob } from './types';
-import { connectTelemetryWebSocket, getJob } from './api/client';
+import { connectTelemetryWebSocket, getJob, listJobs } from './api/client';
 import { Header } from './components/Common/Header';
 import { ProductionDashboard } from './components/Dashboard/ProductionDashboard';
 import { CloneHistory } from './components/History/CloneHistory';
@@ -24,6 +24,49 @@ export const App: React.FC = () => {
       localStorage.setItem('mongoclone_uiscale', scale.toString());
     } catch (e) {}
   }
+
+  // Restore active or paused job on initial page load/refresh
+  useEffect(() => {
+    async function restoreActiveJob() {
+      try {
+        const savedJobId = localStorage.getItem('mongoclone_active_job_id');
+        if (savedJobId) {
+          try {
+            const savedJob = await getJob(savedJobId);
+            if (savedJob && (savedJob.status === 'RUNNING' || savedJob.status === 'PAUSED')) {
+              setActiveJob(savedJob);
+              return;
+            }
+          } catch (e) {
+            // fallback to listJobs
+          }
+        }
+
+        const jobs = await listJobs();
+        if (jobs && jobs.length > 0) {
+          const activeOrPaused = jobs.find(
+            (j) => j.status === 'RUNNING' || j.status === 'PAUSED'
+          );
+          if (activeOrPaused) {
+            setActiveJob(activeOrPaused);
+            localStorage.setItem('mongoclone_active_job_id', activeOrPaused.id);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    restoreActiveJob();
+  }, []);
+
+  // Save active job ID to localStorage when changed
+  useEffect(() => {
+    if (activeJob && (activeJob.status === 'RUNNING' || activeJob.status === 'PAUSED')) {
+      localStorage.setItem('mongoclone_active_job_id', activeJob.id);
+    } else if (activeJob && (activeJob.status === 'COMPLETED' || activeJob.status === 'CANCELLED')) {
+      localStorage.removeItem('mongoclone_active_job_id');
+    }
+  }, [activeJob?.id, activeJob?.status]);
 
   // Connect to live WebSocket progress stream
   useEffect(() => {
