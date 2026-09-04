@@ -8,6 +8,12 @@ import { CloneHistory } from './components/History/CloneHistory';
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
   const [activeJob, setActiveJob] = useState<CloneJob | null>(null);
+  const [resetDashboardKey, setResetDashboardKey] = useState<number>(0);
+
+  function handleNavigateHome() {
+    setActiveTab('dashboard');
+    setResetDashboardKey((prev) => prev + 1);
+  }
 
   // UI Scale / Density state (defaults to 0.65 / 60% compact view as requested)
   const [uiScale, setUiScale] = useState<number>(() => {
@@ -108,7 +114,13 @@ export const App: React.FC = () => {
       {/* Global Header */}
       <Header
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={(tab) => {
+          if (tab === 'dashboard') {
+            handleNavigateHome();
+          } else {
+            setActiveTab(tab);
+          }
+        }}
         activeJobsCount={activeJob?.status === 'RUNNING' ? 1 : 0}
         uiScale={uiScale}
         setUiScale={handleSetUiScale}
@@ -123,6 +135,7 @@ export const App: React.FC = () => {
           <ProductionDashboard
             activeJob={activeJob}
             setActiveJob={setActiveJob}
+            resetKey={resetDashboardKey}
           />
         ) : (
           <CloneHistory

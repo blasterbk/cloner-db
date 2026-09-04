@@ -27,11 +27,13 @@ import {
 interface ProductionDashboardProps {
   activeJob: CloneJob | null;
   setActiveJob: React.Dispatch<React.SetStateAction<CloneJob | null>>;
+  resetKey?: number;
 }
 
 export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   activeJob,
   setActiveJob,
+  resetKey,
 }) => {
   // Live database catalog state from backend database
   const [prodDatabases, setProdDatabases] = useState<ProdDatabaseItem[]>([]);
@@ -39,6 +41,14 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDbForClone, setSelectedDbForClone] = useState<ProdDatabaseItem | null>(null);
+
+  // Return to home page whenever resetKey updates (e.g. user clicked "Production Databases" or logo in header)
+  useEffect(() => {
+    setSelectedDbForClone(null);
+    try {
+      localStorage.removeItem('mongoclone_selected_db_name');
+    } catch (e) {}
+  }, [resetKey]);
 
   // Add Production DB Modal state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -154,10 +164,9 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       );
       setProdDatabases(uniqueDbs);
 
-      // Restore active database if one was saved
-      const savedDbName = localStorage.getItem('mongoclone_selected_db_name');
-      if (savedDbName) {
-        const match = uniqueDbs.find((d) => d.name.toLowerCase() === savedDbName.toLowerCase());
+      // Keep selected database updated if already selected by user
+      if (selectedDbForClone) {
+        const match = uniqueDbs.find((d) => d.name.toLowerCase() === selectedDbForClone.name.toLowerCase());
         if (match) {
           setSelectedDbForClone(match);
         }
@@ -171,28 +180,12 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     }
   }
 
-  // Auto-select database matching activeJob if set (e.g. from page refresh or history resume)
-  useEffect(() => {
-    if (activeJob && (activeJob.status === 'RUNNING' || activeJob.status === 'PAUSED') && !selectedDbForClone && prodDatabases.length > 0) {
-      const srcDbName = activeJob.request?.databases?.[0]?.source_database;
-      if (srcDbName) {
-        const match = prodDatabases.find((d) => d.name.toLowerCase() === srcDbName.toLowerCase());
-        if (match) {
-          setSelectedDbForClone(match);
-          localStorage.setItem('mongoclone_selected_db_name', match.name);
-        }
-      }
-    }
-  }, [activeJob?.id, activeJob?.status, prodDatabases]);
-
   function handleSelectDbForClone(item: ProdDatabaseItem) {
     setSelectedDbForClone(item);
-    localStorage.setItem('mongoclone_selected_db_name', item.name);
   }
 
   function handleBackFromClone() {
     setSelectedDbForClone(null);
-    localStorage.removeItem('mongoclone_selected_db_name');
   }
 
   async function handleTestNewConn() {
