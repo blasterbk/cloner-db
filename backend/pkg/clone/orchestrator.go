@@ -222,7 +222,16 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	// Step 3: Catalog & Schema Discovery
 	job.SetProgressPhase("Catalog Discovery")
 	job.AddLog("INFO", "Inspecting database catalog and schema metadata...")
-	catalog, err := mongopkg.InspectCatalog(ctx, sourceClient, false)
+	var dbHints []string
+	for _, dm := range job.Request.Databases {
+		if dm.SourceDatabase != "" {
+			dbHints = append(dbHints, dm.SourceDatabase)
+		}
+	}
+	if srcUriDb := job.Request.Source.ExtractDatabaseName(); srcUriDb != "" {
+		dbHints = append(dbHints, srcUriDb)
+	}
+	catalog, err := mongopkg.InspectCatalog(ctx, sourceClient, false, dbHints...)
 	if err != nil {
 		o.failJob(job, fmt.Sprintf("Failed to inspect source catalog: %v", err))
 		return

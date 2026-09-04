@@ -107,3 +107,57 @@ func (c *EndpointConfig) GetTimeout() time.Duration {
 	}
 	return time.Duration(c.TimeoutMs) * time.Millisecond
 }
+
+// ExtractDatabaseName extracts the target database name from the URI if specified, or returns empty.
+func (c *EndpointConfig) ExtractDatabaseName() string {
+	raw := strings.TrimSpace(c.URI)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err == nil {
+		path := strings.Trim(parsed.Path, "/")
+		if path != "" && !strings.Contains(path, "/") {
+			if !slicesContains(SystemDatabasesList, strings.ToLower(path)) {
+				return path
+			}
+		}
+	}
+	uParts := strings.Split(raw, "?")
+	base := strings.TrimRight(uParts[0], "/")
+	if slashIdx := strings.LastIndex(base, "/"); slashIdx != -1 {
+		candidate := base[slashIdx+1:]
+		if candidate != "" && !strings.Contains(candidate, "@") && !strings.Contains(candidate, ":") {
+			if !slicesContains(SystemDatabasesList, strings.ToLower(candidate)) {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+// SystemDatabasesList defines system databases to ignore when extracting default database names
+var SystemDatabasesList = []string{"admin", "config", "local"}
+
+func slicesContains(slice []string, val string) bool {
+	for _, item := range slice {
+		if item == val {
+			return true
+		}
+	}
+	return false
+}
+
+// ExtractDatabaseFromProfileName extracts database name if stored like "Cluster (dbname)" or directly "dbname".
+func ExtractDatabaseFromProfileName(name string) string {
+	name = strings.TrimSpace(name)
+	if strings.Contains(name, "(") && strings.HasSuffix(name, ")") {
+		start := strings.LastIndex(name, "(")
+		inner := strings.TrimSpace(name[start+1 : len(name)-1])
+		if inner != "" {
+			return inner
+		}
+	}
+	return name
+}
+

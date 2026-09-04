@@ -80,6 +80,32 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
             const clusterUri = item.profile.config.uri || '';
             const clusterName = item.profile.name;
 
+            const extractDbFromUri = (uri: string): string => {
+              try {
+                const u = uri.split('?')[0].replace(/\/+$/, '');
+                const lastSlash = u.lastIndexOf('/');
+                if (lastSlash !== -1) {
+                  const sub = u.substring(lastSlash + 1);
+                  if (sub && sub !== 'admin' && !sub.includes('@') && !sub.includes(':')) {
+                    return sub;
+                  }
+                }
+              } catch {}
+              return '';
+            };
+
+            const extractDbFromProfile = (name: string): string => {
+              const match = name.match(/\(([^)]+)\)$/);
+              if (match && match[1]) return match[1].trim();
+              return name.trim();
+            };
+
+            const fallbackDbName =
+              extractDbFromUri(clusterUri) ||
+              extractDbFromProfile(clusterName) ||
+              clusterName ||
+              'database';
+
             if (item.catalog?.databases && item.catalog.databases.length > 0) {
               item.catalog.databases.forEach((d) => {
                 dbList.push({
@@ -98,6 +124,20 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
                     indexesCount: c.indexes?.length || 0,
                   })),
                 });
+              });
+            } else {
+              // Fallback: If catalog didn't return any databases (e.g. network timeout, non-admin user, or brand new empty DB),
+              // still register the database card so it is clearly visible and selectable on the dashboard!
+              dbList.push({
+                id: `${item.profile.id}-${fallbackDbName}`,
+                profileId: item.profile.id,
+                name: fallbackDbName,
+                clusterName,
+                clusterUri,
+                sizeBytes: 0,
+                totalCollections: 0,
+                totalDocuments: 0,
+                collections: [],
               });
             }
           });
@@ -174,8 +214,24 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     setSavingNew(true);
 
     try {
-      const name = newClusterName.trim() ? `${newClusterName.trim()} (${newDbName.trim()})` : newDbName.trim();
-      await saveProfile(name, 'source', { uri: newUri.trim() });
+      const db = newDbName.trim();
+      let uriToSave = newUri.trim();
+
+      // Ensure URI contains the database path if user just entered mongodb://host:port or mongodb://host:port/
+      const qIndex = uriToSave.indexOf('?');
+      const baseUri = qIndex !== -1 ? uriToSave.substring(0, qIndex) : uriToSave;
+      const queryParams = qIndex !== -1 ? uriToSave.substring(qIndex) : '';
+
+      const lastSlash = baseUri.lastIndexOf('/');
+      if (lastSlash !== -1) {
+        const afterSlash = baseUri.substring(lastSlash + 1);
+        if (!afterSlash || afterSlash === 'admin') {
+          uriToSave = `${baseUri.replace(/\/+$/, '')}/${encodeURIComponent(db)}${queryParams}`;
+        }
+      }
+
+      const name = newClusterName.trim() ? `${newClusterName.trim()} (${db})` : db;
+      await saveProfile(name, 'source', { uri: uriToSave });
       
       await loadProdDatabases(false);
 

@@ -193,7 +193,7 @@ func main() {
 		}
 		defer client.Disconnect(ctx) //nolint:errcheck
 
-		catalog, err := mongopkg.InspectCatalog(ctx, client, req.IncludeSystemDBs)
+		catalog, err := mongopkg.InspectCatalog(ctx, client, req.IncludeSystemDBs, req.Config.ExtractDatabaseName())
 		if err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -256,8 +256,12 @@ func main() {
 					Profile: p,
 				}
 				fastCfg := p.Config
-				fastCfg.TimeoutMs = 800
-				ctx, cancel := context.WithTimeout(r.Context(), 800*time.Millisecond)
+				timeout := 4000 * time.Millisecond
+				if fastCfg.TimeoutMs > 4000 {
+					timeout = time.Duration(fastCfg.TimeoutMs) * time.Millisecond
+				}
+				fastCfg.TimeoutMs = int(timeout / time.Millisecond)
+				ctx, cancel := context.WithTimeout(r.Context(), timeout)
 				defer cancel()
 
 				client, err := mongopkg.Connect(ctx, &fastCfg)
@@ -280,8 +284,10 @@ func main() {
 				item.Online = true
 				item.ServerInfo = info
 
-				// Fetch lightweight catalog
-				cat, err := mongopkg.InspectCatalog(ctx, client, false)
+				// Fetch lightweight catalog with target DB hints
+				dbHintURI := fastCfg.ExtractDatabaseName()
+				dbHintProfile := mongopkg.ExtractDatabaseFromProfileName(p.Name)
+				cat, err := mongopkg.InspectCatalog(ctx, client, false, dbHintURI, dbHintProfile)
 				if err == nil {
 					item.Catalog = cat
 				}

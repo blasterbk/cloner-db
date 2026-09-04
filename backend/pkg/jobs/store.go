@@ -418,11 +418,9 @@ func (s *Store) SaveProfile(name, pType string, cfg mongopkg.EndpointConfig) Sav
 			s.save()
 
 			if s.profilesColl != nil {
-				go func(item SavedProfile) {
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					_, _ = s.profilesColl.ReplaceOne(ctx, bson.M{"id": item.ID}, item, options.Replace().SetUpsert(true))
-				}(p)
+				ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+				_, _ = s.profilesColl.ReplaceOne(ctx, bson.M{"id": p.ID}, p, options.Replace().SetUpsert(true))
+				cancel()
 			}
 			return p
 		}
@@ -441,11 +439,9 @@ func (s *Store) SaveProfile(name, pType string, cfg mongopkg.EndpointConfig) Sav
 	s.save()
 
 	if s.profilesColl != nil {
-		go func(item SavedProfile) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_, _ = s.profilesColl.ReplaceOne(ctx, bson.M{"id": item.ID}, item, options.Replace().SetUpsert(true))
-		}(profile)
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		_, _ = s.profilesColl.ReplaceOne(ctx, bson.M{"id": profile.ID}, profile, options.Replace().SetUpsert(true))
+		cancel()
 	}
 
 	return profile
@@ -461,7 +457,6 @@ func (s *Store) ListProfiles() []SavedProfile {
 			var dbProfs []SavedProfile
 			if err := cur.All(ctx, &dbProfs); err == nil && len(dbProfs) > 0 {
 				s.mu.Lock()
-				s.profiles = make(map[string]SavedProfile, len(dbProfs))
 				for _, p := range dbProfs {
 					if !isMockProfile(p) {
 						s.profiles[p.ID] = p
@@ -495,11 +490,9 @@ func (s *Store) DeleteProfile(id string) bool {
 		s.save()
 
 		if s.profilesColl != nil {
-			go func(delID string) {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_, _ = s.profilesColl.DeleteOne(ctx, bson.M{"id": delID})
-			}(id)
+			ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+			_, _ = s.profilesColl.DeleteOne(ctx, bson.M{"id": id})
+			cancel()
 		}
 		return true
 	}
@@ -521,11 +514,9 @@ func (s *Store) UpdateProfile(id, name string, cfg mongopkg.EndpointConfig) (Sav
 				s.save()
 
 				if s.profilesColl != nil {
-					go func(item SavedProfile) {
-						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-						defer cancel()
-						_, _ = s.profilesColl.ReplaceOne(ctx, bson.M{"id": item.ID}, item, options.Replace().SetUpsert(true))
-					}(p)
+					ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+					_, _ = s.profilesColl.ReplaceOne(ctx, bson.M{"id": itemID(p.ID)}, p, options.Replace().SetUpsert(true))
+					cancel()
 				}
 				return p, true
 			}
@@ -539,15 +530,18 @@ func (s *Store) UpdateProfile(id, name string, cfg mongopkg.EndpointConfig) (Sav
 	s.save()
 
 	if s.profilesColl != nil {
-		go func(item SavedProfile) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_, _ = s.profilesColl.ReplaceOne(ctx, bson.M{"id": item.ID}, item, options.Replace().SetUpsert(true))
-		}(prof)
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		_, _ = s.profilesColl.ReplaceOne(ctx, bson.M{"id": prof.ID}, prof, options.Replace().SetUpsert(true))
+		cancel()
 	}
 
 	return prof, true
 }
+
+func itemID(id string) string {
+	return id
+}
+
 
 // SaveSchedule creates or updates a recurring clone schedule.
 func (s *Store) SaveSchedule(name, frequency, cronSpec string, req types.CloneJobRequest) ScheduledJob {

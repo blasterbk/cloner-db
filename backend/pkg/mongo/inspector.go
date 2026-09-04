@@ -60,7 +60,7 @@ type ClusterCatalog struct {
 var SystemDatabases = []string{"admin", "config", "local"}
 
 // InspectCatalog performs a fast concurrent scan of all databases, collections, and indexes.
-func InspectCatalog(ctx context.Context, client *mongo.Client, includeSystemDBs bool) (*ClusterCatalog, error) {
+func InspectCatalog(ctx context.Context, client *mongo.Client, includeSystemDBs bool, targetDBHints ...string) (*ClusterCatalog, error) {
 	catalog := &ClusterCatalog{
 		Databases: make([]DatabaseDetail, 0),
 	}
@@ -71,9 +71,10 @@ func InspectCatalog(ctx context.Context, client *mongo.Client, includeSystemDBs 
 	var dbNames []string
 	dbSizes := make(map[string]int64)
 
-	listCtx, listCancel := context.WithTimeout(ctx, 3*time.Second)
+	listCtx, listCancel := context.WithTimeout(ctx, 4*time.Second)
 	defer listCancel()
 
+	// Strategy A: Standard cluster-wide listDatabases
 	if err := adminDB.RunCommand(listCtx, bson.D{{Key: "listDatabases", Value: 1}}).Decode(&listRes); err == nil {
 		if rawDBs, ok := listRes["databases"].(bson.A); ok {
 			for _, dbRaw := range rawDBs {
@@ -91,10 +92,53 @@ func InspectCatalog(ctx context.Context, client *mongo.Client, includeSystemDBs 
 		}
 	}
 
-	// Fallback to client.ListDatabaseNames if listDatabases admin command returned empty
+	// Strategy B: Non-admin authorized databases command (works for users without cluster-wide admin rights)
 	if len(dbNames) == 0 {
-		if names, err := client.ListDatabaseNames(ctx, bson.D{}); err == nil {
+		var authListRes bson.M
+		if err := adminDB.RunCommand(listCtx, bson.D{{Key: "listDatabases", Value: 1}, {Key: "authorizedDatabases", Value: true}}).Decode(&authListRes); err == nil {
+			if rawDBs, ok := authListRes["databases"].(bson.A); ok {
+				for _, dbRaw := range rawDBs {
+					if dbObj, ok := dbRaw.(bson.M); ok {
+						if name, ok := dbObj["name"].(string); ok && name != "" {
+							dbNames = append(dbNames, name)
+							if sz, ok := dbObj["sizeOnDisk"].(float64); ok {
+								dbSizes[name] = int64(sz)
+							} else if sz, ok := dbObj["sizeOnDisk"].(int64); ok {
+								dbSizes[name] = sz
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Strategy C: Client ListDatabaseNames with SetAuthorizedDatabases
+	if len(dbNames) == 0 {
+		listOpts := options.ListDatabases().SetAuthorizedDatabases(true)
+		if names, err := client.ListDatabaseNames(listCtx, bson.D{}, listOpts); err == nil && len(names) > 0 {
 			dbNames = names
+		}
+	}
+
+	// Strategy D: Fallback to regular client.ListDatabaseNames
+	if len(dbNames) == 0 {
+		if names, err := client.ListDatabaseNames(listCtx, bson.D{}); err == nil {
+			dbNames = names
+		}
+	}
+
+	// Strategy E: Incorporate database hints (from URI, profile name, or target job spec)
+	for _, hint := range targetDBHints {
+		hint = strings.TrimSpace(hint)
+		if hint == "" {
+			continue
+		}
+		if !includeSystemDBs && slices.Contains(SystemDatabases, hint) {
+			continue
+		}
+		if !slices.Contains(dbNames, hint) {
+			dbNames = append(dbNames, hint)
 		}
 	}
 
@@ -288,6 +332,13 @@ func InspectCatalog(ctx context.Context, client *mongo.Client, includeSystemDBs 
 
 	for i := 0; i < len(filteredDBs); i++ {
 		if d, ok := dbMap[i]; ok {
+			if d.SizeBytes == 0 {
+				var calcSize int64
+				for _, c := range d.Collections {
+					calcSize += c.StorageSize
+				}
+				d.SizeBytes = calcSize
+			}
 			catalog.Databases = append(catalog.Databases, d)
 			catalog.TotalCollections += d.TotalCollections
 			catalog.TotalDocuments += d.TotalDocuments
