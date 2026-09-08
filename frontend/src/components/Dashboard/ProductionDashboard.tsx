@@ -231,36 +231,41 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
         console.warn('Live connections overview unavailable, falling back to profiles:', overviewErr);
       }
 
-      // 2. Secondary Fallback: If live overview returned 0 source DBs, query raw saved profiles!
-      // This ensures newly registered DBs or DBs with slow connections always render on the dashboard.
-      if (dbList.length === 0) {
-        try {
-          const rawProfiles = await listProfiles();
-          const sources = rawProfiles.filter((p) => p.type === 'source');
-          sources.forEach((p) => {
-            const uri = p.config?.uri || '';
-            const match = p.name.match(/\(([^)]+)\)$/);
-            const dbName = match ? match[1].trim() : p.name.trim();
-            dbList.push({
-              id: `${p.id}-${dbName}`,
-              profileId: p.id,
-              name: dbName,
-              actualDbName: dbName,
-              clusterName: p.name,
-              clusterUri: uri,
-              sizeBytes: 0,
-              totalCollections: 0,
-              totalDocuments: 0,
-              collections: [],
-            });
+      // 2. Always merge raw saved profiles as a safety net.
+      // This ensures every registered production DB ALWAYS appears on the dashboard,
+      // even if the live overview fails, times out, or returns no catalog data.
+      // Deduplication by profileId below ensures no duplicates from overlap.
+      try {
+        const rawProfiles = await listProfiles();
+        const sources = rawProfiles.filter((p) => p.type === 'source');
+        sources.forEach((p) => {
+          // Skip if already represented via overview (same profileId)
+          const alreadyAdded = dbList.some((d) => d.profileId === p.id);
+          if (alreadyAdded) return;
+
+          const uri = p.config?.uri || '';
+          const pMatch = p.name.match(/\(([^)]+)\)$/);
+          const dbName = pMatch ? pMatch[1].trim() : p.name.trim();
+          dbList.push({
+            id: `${p.id}-${dbName}`,
+            profileId: p.id,
+            name: dbName,
+            actualDbName: dbName,
+            clusterName: p.name,
+            clusterUri: uri,
+            sizeBytes: 0,
+            totalCollections: 0,
+            totalDocuments: 0,
+            collections: [],
           });
-        } catch (profileErr) {
-          console.error('Failed to load fallback profiles:', profileErr);
-        }
+        });
+      } catch (profileErr) {
+        console.error('Failed to load fallback profiles:', profileErr);
       }
 
+      // Deduplicate by profileId first, then name+uri as secondary key
       const uniqueDbs = Array.from(
-        new Map(dbList.map((item) => [`${item.name}-${item.clusterUri}`, item])).values()
+        new Map(dbList.map((item) => [item.profileId || `${item.name}-${item.clusterUri}`, item])).values()
       );
       setProdDatabases(uniqueDbs);
 
@@ -514,6 +519,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
   const filtered = prodDatabases.filter(
     (d) =>
+      !searchQuery ||
       d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       d.clusterName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       d.collections.some((c) => c.name.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -693,7 +699,9 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       {/* Production Databases Grid */}
       {filtered.length === 0 ? (
         <div className="p-10 text-center glass-panel rounded-xl border border-dashed border-slate-800 text-xs text-slate-500">
-          No matching production databases found for "{searchQuery}".
+          {prodDatabases.length === 0
+            ? 'No production databases registered yet. Click "+ Add Production DB" to register one.'
+            : `No matching production databases found for "${searchQuery}".`}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
