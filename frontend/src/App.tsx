@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CloneJob } from './types';
 import { connectTelemetryWebSocket, getJob, listJobs } from './api/client';
 import { Header } from './components/Common/Header';
@@ -9,6 +9,9 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
   const [activeJob, setActiveJob] = useState<CloneJob | null>(null);
   const [resetDashboardKey, setResetDashboardKey] = useState<number>(0);
+  // WebSocket health tracking for smart polling fallback
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsDisconnectedSince = useRef<number | null>(null);
 
   function handleNavigateHome() {
     setActiveTab('dashboard');
@@ -36,9 +39,15 @@ export const App: React.FC = () => {
     async function restoreActiveJob() {
       try {
         const savedJobId = localStorage.getItem('mongoclone_active_job_id');
-        const dismissedJobId = localStorage.getItem('mongoclone_dismissed_job_id');
+        let dismissedIds: string[] = [];
+        try {
+          const raw = localStorage.getItem('mongoclone_dismissed_job_ids');
+          if (raw) dismissedIds = JSON.parse(raw);
+          const legacy = localStorage.getItem('mongoclone_dismissed_job_id');
+          if (legacy && !dismissedIds.includes(legacy)) dismissedIds.push(legacy);
+        } catch (e) {}
 
-        if (savedJobId && savedJobId !== dismissedJobId) {
+        if (savedJobId && !dismissedIds.includes(savedJobId)) {
           try {
             const savedJob = await getJob(savedJobId);
             if (savedJob && (savedJob.status === 'RUNNING' || savedJob.status === 'PAUSED')) {
@@ -50,14 +59,16 @@ export const App: React.FC = () => {
           }
         }
 
+        // Only auto-restore an actively RUNNING job if one is in progress across the cluster.
+        // Never auto-promote old PAUSED or interrupted jobs to hijack the top dashboard banner.
         const jobs = await listJobs();
         if (jobs && jobs.length > 0) {
-          const activeOrPaused = jobs.find(
-            (j) => (j.status === 'RUNNING' || j.status === 'PAUSED') && j.id !== dismissedJobId
+          const runningJob = jobs.find(
+            (j) => j.status === 'RUNNING' && !dismissedIds.includes(j.id)
           );
-          if (activeOrPaused) {
-            setActiveJob(activeOrPaused);
-            localStorage.setItem('mongoclone_active_job_id', activeOrPaused.id);
+          if (runningJob) {
+            setActiveJob(runningJob);
+            localStorage.setItem('mongoclone_active_job_id', runningJob.id);
           }
         }
       } catch (e) {
@@ -71,33 +82,72 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (activeJob && (activeJob.status === 'RUNNING' || activeJob.status === 'PAUSED')) {
       localStorage.setItem('mongoclone_active_job_id', activeJob.id);
-    } else if (activeJob && (activeJob.status === 'COMPLETED' || activeJob.status === 'CANCELLED')) {
+    } else {
       localStorage.removeItem('mongoclone_active_job_id');
     }
   }, [activeJob?.id, activeJob?.status]);
 
-  // Connect to live WebSocket progress stream
+  // Connect to live WebSocket progress stream — tracks connection health for smart polling
   useEffect(() => {
-    const disconnect = connectTelemetryWebSocket((msg) => {
-      if (msg.type === 'PROGRESS' && msg.payload) {
-        setActiveJob((prev) => {
-          if (!prev || prev.id === msg.payload.id) {
-            return msg.payload;
-          }
-          return prev;
-        });
+    const disconnect = connectTelemetryWebSocket(
+      (msg) => {
+        if (msg.type === 'PROGRESS' && msg.payload) {
+          const p = msg.payload;
+          setActiveJob((prev) => {
+            // If the job was cancelled or completed, clear it from activeJob if it matches
+            if (p.status === 'CANCELLED' || p.status === 'COMPLETED') {
+              if (prev && prev.id === p.id) {
+                return null;
+              }
+              return prev;
+            }
+
+            // If no active job is tracked, only accept actively RUNNING jobs
+            if (!prev) {
+              if (p.status === 'RUNNING') {
+                return p;
+              }
+              return null;
+            }
+
+            // If active job matches, update telemetry
+            if (prev.id === p.id) {
+              return p;
+            }
+
+            return prev;
+          });
+        }
+      },
+      // onOpen: WebSocket connected
+      () => {
+        setWsConnected(true);
+        wsDisconnectedSince.current = null;
+      },
+      // onClose: WebSocket disconnected
+      () => {
+        setWsConnected(false);
+        if (wsDisconnectedSince.current === null) {
+          wsDisconnectedSince.current = Date.now();
+        }
       }
-    });
+    );
 
     return () => disconnect();
   }, []);
 
-  // Fast HTTP Polling Fallback (ensures real-time telemetry if WebSocket proxy disconnects)
+  // Smart HTTP Polling Fallback — activates only when WebSocket has been disconnected for >3s.
+  // Uses 2s interval instead of 800ms to reduce API call volume during normal operation.
   useEffect(() => {
     if (!activeJob || (activeJob.status !== 'PENDING' && activeJob.status !== 'RUNNING')) {
       return;
     }
     const interval = setInterval(async () => {
+      // Only poll if WebSocket has been down for more than 3 seconds
+      if (wsConnected) return;
+      const sinceDisconnect = Date.now() - (wsDisconnectedSince.current ?? Date.now());
+      if (sinceDisconnect < 3000) return;
+
       try {
         const fresh = await getJob(activeJob.id);
         if (fresh) {
@@ -106,10 +156,10 @@ export const App: React.FC = () => {
       } catch (e) {
         // ignore
       }
-    }, 800);
+    }, 2000);
 
     return () => clearInterval(interval);
-  }, [activeJob?.id, activeJob?.status]);
+  }, [activeJob?.id, activeJob?.status, wsConnected]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col bg-grid-pattern selection:bg-brand-500 selection:text-white">

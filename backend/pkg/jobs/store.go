@@ -91,6 +91,11 @@ func (s *Store) GetDB() *mongo.Database {
 	return s.mongoDB
 }
 
+// IsMongoConnected returns true if the store has an active MongoDB connection.
+func (s *Store) IsMongoConnected() bool {
+	return s.mongoClient != nil && s.mongoDB != nil
+}
+
 // initMongoDB initializes the remote MongoDB database collections.
 func (s *Store) initMongoDB(uri string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -248,15 +253,10 @@ func (s *Store) syncSchedules(ctx context.Context) {
 	}
 }
 
-// isMockProfile checks whether a profile is an old hardcoded mock/dummy entry.
+// isMockProfile checks whether a profile is an old hardcoded mock/dummy entry seeded during development.
+// Only filters profiles with legacy hardcoded ID prefixes — never filters by URI or name.
 func isMockProfile(p SavedProfile) bool {
-	if strings.HasPrefix(p.ID, "prof-prod-") || strings.HasPrefix(p.ID, "prof-test-") {
-		return true
-	}
-	if p.Name == "payment_service_prod" || strings.Contains(p.Config.URI, "127.0.0.1:27017") {
-		return true
-	}
-	return false
+	return strings.HasPrefix(p.ID, "prof-prod-") || strings.HasPrefix(p.ID, "prof-test-")
 }
 
 // CreateJob registers a new job and saves it to store and MongoDB.
@@ -302,6 +302,7 @@ func (s *Store) CreateJob(req types.CloneJobRequest) *types.CloneJob {
 }
 
 // SaveJob persists the updated state of a clone job into memory, local cache, and MongoDB.
+// Use for status transitions (PAUSED, COMPLETED, CANCELLED, FAILED) that require guaranteed persistence.
 func (s *Store) SaveJob(job *types.CloneJob) {
 	s.mu.Lock()
 	s.jobs[job.ID] = job
@@ -312,8 +313,27 @@ func (s *Store) SaveJob(job *types.CloneJob) {
 	if s.jobsColl != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		opts := options.Replace().SetUpsert(true)
-		_, _ = s.jobsColl.ReplaceOne(ctx, bson.M{"id": job.ID}, job.GetSnapshot(), opts)
+		_, _ = s.jobsColl.ReplaceOne(ctx, bson.M{"id": job.ID}, job.GetSafeSnapshot(), opts)
 		cancel()
+	}
+}
+
+// SaveJobAsync persists job progress asynchronously to MongoDB only (fire-and-forget).
+// Use for high-frequency progress telemetry updates (400ms ticks) to avoid expensive
+// full-history disk rewrites during active clone operations.
+func (s *Store) SaveJobAsync(job *types.CloneJob) {
+	s.mu.Lock()
+	s.jobs[job.ID] = job
+	s.mu.Unlock()
+
+	// Only write to MongoDB asynchronously — skip disk rewrite for performance
+	if s.jobsColl != nil {
+		go func(snap types.CloneJob) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			opts := options.Replace().SetUpsert(true)
+			_, _ = s.jobsColl.ReplaceOne(ctx, bson.M{"id": snap.ID}, snap, opts)
+		}(job.GetSafeSnapshot())
 	}
 }
 

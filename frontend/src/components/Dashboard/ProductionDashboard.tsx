@@ -83,14 +83,21 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       : `Are you sure you want to stop and cancel this migration (${activeJob.name})?`;
     if (!window.confirm(confirmMsg)) return;
 
+    const targetJobId = activeJob.id;
     setCancellingActiveJob(true);
     try {
-      await cancelJob(activeJob.id);
+      await cancelJob(targetJobId);
     } catch (e: any) {
       console.error('Failed to cancel job:', e);
     } finally {
       try {
-        localStorage.setItem('mongoclone_dismissed_job_id', activeJob.id);
+        const raw = localStorage.getItem('mongoclone_dismissed_job_ids');
+        const list: string[] = raw ? JSON.parse(raw) : [];
+        if (!list.includes(targetJobId)) {
+          list.push(targetJobId);
+        }
+        localStorage.setItem('mongoclone_dismissed_job_ids', JSON.stringify(list));
+        localStorage.setItem('mongoclone_dismissed_job_id', targetJobId);
         localStorage.removeItem('mongoclone_active_job_id');
         localStorage.removeItem('mongoclone_selected_db_name');
       } catch (e) {}

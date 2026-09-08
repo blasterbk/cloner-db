@@ -176,7 +176,9 @@ export async function deleteProfile(id: string): Promise<boolean> {
 
 // WebSocket Stream Client
 export function connectTelemetryWebSocket(
-  onMessage: (msg: { type: string; job_id?: string; payload: any }) => void
+  onMessage: (msg: { type: string; job_id?: string; payload: any }) => void,
+  onOpen?: () => void,
+  onClose?: () => void
 ): () => void {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -188,6 +190,10 @@ export function connectTelemetryWebSocket(
   function connect() {
     ws = new WebSocket(wsUrl);
 
+    ws.onopen = () => {
+      onOpen?.();
+    };
+
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -198,6 +204,7 @@ export function connectTelemetryWebSocket(
     };
 
     ws.onclose = () => {
+      onClose?.();
       if (!isClosed) {
         reconnectTimeout = setTimeout(connect, 3000);
       }

@@ -96,6 +96,28 @@ func (o *Orchestrator) PauseJob(jobID string) bool {
 	return false
 }
 
+// PauseAllRunning pauses all currently running jobs for graceful server shutdown.
+// Checkpoints are flushed so every job can be safely resumed after restart.
+func (o *Orchestrator) PauseAllRunning() {
+	o.mu.Lock()
+	runningIDs := make([]string, 0, len(o.cancelFuncs))
+	for id, cancel := range o.cancelFuncs {
+		o.pausedJobs[id] = true
+		cancel()
+		runningIDs = append(runningIDs, id)
+	}
+	o.mu.Unlock()
+
+	for _, id := range runningIDs {
+		if job, found := o.store.GetJob(id); found {
+			job.SetStatus(types.StatusPaused)
+			job.AddLog("WARN", "⚠️ Server shutting down — job paused safely. All progress checkpointed. Resume after restart.")
+			o.checkpointMgr.FlushCheckpoint(id)
+			o.store.SaveJob(job)
+		}
+	}
+}
+
 // ResumeJob resumes a previously paused, interrupted, cancelled, or failed clone job from its checkpoint.
 func (o *Orchestrator) ResumeJob(jobID string) (bool, error) {
 	job, found := o.store.GetJob(jobID)
@@ -142,8 +164,8 @@ func (o *Orchestrator) CancelJob(jobID string) bool {
 
 	if job, found := o.store.GetJob(jobID); found {
 		job.SetStatus(types.StatusCancelled)
-		job.AddLog("WARN", "Job execution was cancelled by user. Checkpoint preserved for resuming.")
-		o.checkpointMgr.FlushCheckpoint(jobID)
+		job.AddLog("WARN", "Job execution was cancelled by user. Checkpoint cleared.")
+		o.checkpointMgr.DeleteCheckpoint(jobID)
 		o.store.SaveJob(job)
 		o.broadcastUpdate(job)
 		return true
@@ -522,11 +544,12 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 		if isPaused {
 			job.SetStatus(types.StatusPaused)
 			job.AddLog("INFO", "⏸️ Job execution paused. Checkpoint saved. Click Resume to continue.")
+			o.checkpointMgr.FlushCheckpoint(job.ID)
 		} else {
 			job.SetStatus(types.StatusCancelled)
-			job.AddLog("WARN", "Job execution was cancelled. Checkpoint saved for resume.")
+			job.AddLog("WARN", "Job execution was cancelled. Checkpoint cleared.")
+			o.checkpointMgr.DeleteCheckpoint(job.ID)
 		}
-		o.checkpointMgr.FlushCheckpoint(job.ID)
 		o.store.SaveJob(job)
 		o.broadcastUpdate(job)
 		return
@@ -567,12 +590,16 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 			},
 		})
 
-		replayed, err := replayer.Replay(ctx)
+		replayed, failedOps, err := replayer.Replay(ctx)
 		if err != nil {
 			job.AddLog("WARN", fmt.Sprintf("Oplog replay warning: %v", err))
 		} else {
 			job.SetProgressReplayedOplogOps(replayed)
-			job.AddLog("SUCCESS", fmt.Sprintf("Successfully replayed %d incremental oplog operations", replayed))
+			if failedOps > 0 {
+				job.AddLog("WARN", fmt.Sprintf("Replayed %d oplog operations (%d non-fatal errors — duplicates excluded).", replayed, failedOps))
+			} else {
+				job.AddLog("SUCCESS", fmt.Sprintf("Successfully replayed %d incremental oplog operations", replayed))
+			}
 		}
 	}
 
@@ -595,8 +622,11 @@ func (o *Orchestrator) failJob(job *types.CloneJob, errMsg string) {
 	o.broadcastUpdate(job)
 }
 
+// broadcastUpdate broadcasts a safe (credential-free) snapshot of the job to all WebSocket clients
+// and asynchronously persists progress. Uses safe snapshot to prevent leaking DB credentials over WS.
+// For status transitions, callers should also call store.SaveJob() explicitly for guaranteed persistence.
 func (o *Orchestrator) broadcastUpdate(job *types.CloneJob) {
-	snapshot := job.GetSnapshot()
+	snapshot := job.GetSafeSnapshot()
 	o.hub.BroadcastJSON("PROGRESS", job.ID, snapshot)
-	o.store.SaveJob(job)
+	o.store.SaveJobAsync(job)
 }

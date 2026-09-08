@@ -290,3 +290,15 @@ func (j *CloneJob) GetSnapshot() CloneJob {
 
 	return copied
 }
+
+// GetSafeSnapshot returns a thread-safe copy of the job with all source/target credentials redacted.
+// Use this for all API responses and WebSocket broadcasts to prevent leaking DB passwords.
+func (j *CloneJob) GetSafeSnapshot() CloneJob {
+	snap := j.GetSnapshot()
+	// Strip all credential fields — keep only masked display strings
+	snap.Request.Source.URI      = ""
+	snap.Request.Source.Password = ""
+	snap.Request.Target.URI      = ""
+	snap.Request.Target.Password = ""
+	return snap
+}

@@ -9,10 +9,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mongoclone/engine/pkg/clone"
@@ -51,6 +53,7 @@ func loadEnvFile(path string) {
 }
 
 func main() {
+	startTime := time.Now()
 	// Load .env file from current working directory (backend root)
 	loadEnvFile(".env")
 	loadEnvFile("../.env") // also try repo root
@@ -116,12 +119,18 @@ func main() {
 		}
 	}
 
-	// 1. Health check
+	// 1. Health check with store diagnostics
 	mux.HandleFunc("/health", cors(func(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]any{
-			"status":  "ok",
-			"version": "1.0.0",
-			"time":    time.Now().UTC().Format(time.RFC3339),
+			"status":          "ok",
+			"version":         "1.0.0",
+			"time":            time.Now().UTC().Format(time.RFC3339),
+			"uptime_seconds":  int64(time.Since(startTime).Seconds()),
+			"store": map[string]any{
+				"mongodb":  store.IsMongoConnected(),
+				"profiles": len(store.ListProfiles()),
+				"jobs":     len(store.ListJobs()),
+			},
 		})
 	}))
 
@@ -324,7 +333,7 @@ func main() {
 			job := store.CreateJob(req)
 			orchestrator.StartJob(job)
 
-			jsonResponse(w, http.StatusAccepted, job.GetSnapshot())
+			jsonResponse(w, http.StatusAccepted, job.GetSafeSnapshot())
 
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -386,7 +395,7 @@ func main() {
 				jsonResponse(w, http.StatusNotFound, map[string]string{"error": "Job not found"})
 				return
 			}
-			jsonResponse(w, http.StatusOK, job.GetSnapshot())
+			jsonResponse(w, http.StatusOK, job.GetSafeSnapshot())
 
 		case "DELETE":
 			deleted := store.DeleteJob(jobID)
@@ -534,11 +543,37 @@ func main() {
 	log.Printf("================================================================")
 	log.Printf(" MongoClone Backend Engine listening on http://%s", addr)
 	log.Printf(" WebSocket stream active on ws://%s/ws", addr)
+	log.Printf(" Uptime tracking started: %s", startTime.Format(time.RFC3339))
 	log.Printf("================================================================")
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 120 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	// Graceful shutdown: pause running jobs, drain HTTP, then exit cleanly
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+	log.Printf("[shutdown] Signal '%v' received — pausing running jobs and shutting down...", sig)
+
+	orchestrator.PauseAllRunning()
+
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutCancel()
+	if err := server.Shutdown(shutCtx); err != nil {
+		log.Printf("[shutdown] HTTP server forced close: %v", err)
+	}
+	log.Printf("[shutdown] MongoClone exited cleanly. All job checkpoints preserved.")
 }
 
 func jsonResponse(w http.ResponseWriter, status int, data any) {

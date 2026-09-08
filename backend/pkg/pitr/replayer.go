@@ -42,7 +42,8 @@ func NewReplayer(sourceClient, targetClient *mongo.Client, cfg *ReplayerConfig) 
 }
 
 // Replay streams and applies oplog entries matching the time window and database filters.
-func (r *Replayer) Replay(ctx context.Context) (int64, error) {
+// Returns (replayedCount, failedOps, error). failedOps counts non-duplicate errors encountered during replay.
+func (r *Replayer) Replay(ctx context.Context) (int64, int64, error) {
 	oplogColl := r.sourceClient.Database("local").Collection("oplog.rs")
 
 	// 1. Build time range query
@@ -67,22 +68,23 @@ func (r *Replayer) Replay(ctx context.Context) (int64, error) {
 
 	cursor, err := oplogColl.Find(ctx, filter, findOpts)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open oplog cursor: %w", err)
+		return 0, 0, fmt.Errorf("failed to open oplog cursor: %w", err)
 	}
 	defer cursor.Close(ctx)
 
 	var replayedCount int64
+	var failedOps int64
 
 	for cursor.Next(ctx) {
 		select {
 		case <-ctx.Done():
-			return replayedCount, ctx.Err()
+			return replayedCount, failedOps, ctx.Err()
 		default:
 		}
 
 		var entry bson.M
 		if err := cursor.Decode(&entry); err != nil {
-			return replayedCount, fmt.Errorf("failed to decode oplog entry: %w", err)
+			return replayedCount, failedOps, fmt.Errorf("failed to decode oplog entry: %w", err)
 		}
 
 		ns, _ := entry["ns"].(string)
@@ -120,10 +122,18 @@ func (r *Replayer) Replay(ctx context.Context) (int64, error) {
 			targetDB = mapped
 		}
 
-		// Apply operation
+		// Apply operation — distinguish harmless duplicate key errors from real failures.
+		// Duplicate key errors are safe to skip for idempotent replay; all other errors are logged.
 		if err := r.applyOp(ctx, targetDB, sourceColl, op, entry); err != nil {
-			// Log and continue on non-fatal duplicate key errors
-			// or return if critical
+			if mongo.IsDuplicateKeyError(err) {
+				// Idempotent replay — document already exists, safe to skip
+			} else {
+				failedOps++
+				if r.cfg.ProgressCb != nil {
+					r.cfg.ProgressCb(replayedCount, ts,
+						fmt.Sprintf("WARN: applyOp '%s' on %s.%s failed (op #%d): %v", op, targetDB, sourceColl, replayedCount+1, err))
+				}
+			}
 		}
 
 		replayedCount++
@@ -134,10 +144,15 @@ func (r *Replayer) Replay(ctx context.Context) (int64, error) {
 	}
 
 	if err := cursor.Err(); err != nil {
-		return replayedCount, fmt.Errorf("oplog cursor error: %w", err)
+		return replayedCount, failedOps, fmt.Errorf("oplog cursor error: %w", err)
 	}
 
-	return replayedCount, nil
+	if failedOps > 0 && r.cfg.ProgressCb != nil {
+		r.cfg.ProgressCb(replayedCount, primitive.Timestamp{},
+			fmt.Sprintf("WARN: Oplog replay completed with %d non-fatal errors (duplicates excluded). Replayed %d ops total.", failedOps, replayedCount))
+	}
+
+	return replayedCount, failedOps, nil
 }
 
 // applyOp translates and executes a single oplog operation on the target cluster.
