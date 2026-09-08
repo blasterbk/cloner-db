@@ -6,18 +6,14 @@ import { LoginPage } from './components/Common/LoginPage';
 import { ProductionDashboard } from './components/Dashboard/ProductionDashboard';
 import { CloneHistory } from './components/History/CloneHistory';
 
-export const App: React.FC = () => {
-  // Auth gate — check localStorage for existing token
+// ─── AuthGate ────────────────────────────────────────────────────────────────
+// A thin wrapper that owns the auth token state. When unauthenticated it renders
+// only the LoginPage; once logged in it renders the main App shell.
+// This pattern avoids conditional hook calls inside the main component.
+
+const AuthGate: React.FC = () => {
   const [authToken, setAuthToken] = useState<string>(() => getAuthToken());
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
-  const [activeJob, setActiveJob] = useState<CloneJob | null>(null);
-  const [resetDashboardKey, setResetDashboardKey] = useState<number>(0);
-  // WebSocket health tracking for smart polling fallback
-  const [wsConnected, setWsConnected] = useState(false);
-  const wsDisconnectedSince = useRef<number | null>(null);
-
-  // Show login page if not authenticated
   if (!authToken) {
     return (
       <LoginPage
@@ -28,6 +24,30 @@ export const App: React.FC = () => {
       />
     );
   }
+
+  return (
+    <App
+      onLogout={async () => {
+        await logoutUser();
+        setAuthToken('');
+      }}
+    />
+  );
+};
+
+// ─── Main App ────────────────────────────────────────────────────────────────
+
+interface AppProps {
+  onLogout: () => void;
+}
+
+export const App: React.FC<AppProps> = ({ onLogout }) => {
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
+  const [activeJob, setActiveJob] = useState<CloneJob | null>(null);
+  const [resetDashboardKey, setResetDashboardKey] = useState<number>(0);
+  // WebSocket health tracking for smart polling fallback
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsDisconnectedSince = useRef<number | null>(null);
 
   function handleNavigateHome() {
     setActiveTab('dashboard');
@@ -192,10 +212,7 @@ export const App: React.FC = () => {
         activeJobsCount={activeJob?.status === 'RUNNING' ? 1 : 0}
         uiScale={uiScale}
         setUiScale={handleSetUiScale}
-        onLogout={async () => {
-          await logoutUser();
-          setAuthToken('');
-        }}
+        onLogout={onLogout}
       />
 
       {/* Main Scaled Container (Supports 60% / 80% / 100% density) */}
@@ -222,4 +239,5 @@ export const App: React.FC = () => {
     </div>
   );
 };
-export default App;
+
+export default AuthGate;

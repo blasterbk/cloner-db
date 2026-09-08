@@ -1,17 +1,39 @@
-# 1. Push the new binary to your server
-cd ~/cloner-db/backend
-git pull
-go build -o mongoclone cmd/server/main.go
+# ─── Full Build + Deploy ───────────────────────────────────────────
+# Run this script on the SERVER to deploy all changes.
+# The correct build order is CRITICAL:
+#   1) Build frontend  →  2) Copy into backend/web/  →  3) Build Go binary
+# ───────────────────────────────────────────────────────────────────
 
-# 2. Stop old PM2 process
+cd ~/cloner-db
+
+# 1. Pull latest code
+git pull
+
+# 2. Build frontend (the output goes to frontend/dist/)
+cd frontend
+npm install --silent
+npm run build
+
+# 3. CRITICAL: Copy frontend dist into backend/web/ (Go embeds from HERE, not frontend/dist/)
+rm -rf ../backend/web/assets
+cp -r dist/assets ../backend/web/assets
+cp dist/index.html ../backend/web/index.html
+echo "✅ Frontend assets synced to backend/web/"
+
+# 4. Build Go binary (now embeds the new frontend from backend/web/)
+cd ../backend
+go build -o mongoclone ./cmd/server
+echo "✅ Binary built"
+
+# 5. Stop old PM2 process
 pm2 stop mongoclone
 pm2 delete mongoclone
 
-# 3. Start with the new ecosystem config (prevents memory restarts)
+# 6. Start with the new ecosystem config (memory limits + auth env vars)
 pm2 start ecosystem.config.js
 
-# 4. Save so it survives server reboot
+# 7. Save so it survives server reboot
 pm2 save
 
-# Verify the new memory limit is applied
+# 8. Verify
 pm2 show mongoclone
