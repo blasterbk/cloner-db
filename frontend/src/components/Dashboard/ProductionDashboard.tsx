@@ -70,6 +70,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
   // Delete confirmation modal state
   const [dbToDelete, setDbToDelete] = useState<ProdDatabaseItem | null>(null);
+  const [deletingDb, setDeletingDb] = useState(false);
 
   // Active job cancellation state
   const [cancellingActiveJob, setCancellingActiveJob] = useState(false);
@@ -194,9 +195,16 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
           });
       }
 
+      // Filter out databases explicitly removed by the user
+      let removedList: string[] = [];
+      try {
+        const raw = localStorage.getItem('mongoclone_removed_dbs');
+        if (raw) removedList = JSON.parse(raw);
+      } catch (e) {}
+
       const uniqueDbs = Array.from(
         new Map(dbList.map((item) => [`${item.name}-${item.clusterUri}`, item])).values()
-      );
+      ).filter((d) => !removedList.includes(`${d.name}@${d.clusterUri}`) && !removedList.includes(d.name));
       setProdDatabases(uniqueDbs);
 
       // Keep selected database updated if already selected by user
@@ -267,6 +275,16 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       const name = newClusterName.trim() ? `${newClusterName.trim()} (${db})` : db;
       await saveProfile(name, 'source', { uri: uriToSave });
       
+      // Clear any removed database tombstone if user is re-adding it
+      try {
+        const raw = localStorage.getItem('mongoclone_removed_dbs');
+        if (raw) {
+          const list: string[] = JSON.parse(raw);
+          const updated = list.filter((x) => x !== db && !x.startsWith(`${db}@`));
+          localStorage.setItem('mongoclone_removed_dbs', JSON.stringify(updated));
+        }
+      } catch (e) {}
+
       await loadProdDatabases(false);
 
       setIsAddModalOpen(false);
@@ -335,21 +353,51 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   }
 
   async function confirmDeleteDb() {
-    if (!dbToDelete) return;
+    if (!dbToDelete || deletingDb) return;
     const item = dbToDelete;
+    const itemDbName = item.name;
+    const itemKey = `${item.name}@${item.clusterUri}`;
 
-    const lastHyphen = item.id.lastIndexOf(`-${item.name}`);
-    const profileId = (item as any).profileId || (lastHyphen !== -1 ? item.id.substring(0, lastHyphen) : item.id.split('-')[0]);
-    if (profileId) {
-      try {
-        await deleteProfile(profileId);
-      } catch (err) {
-        console.error('Failed to delete profile from backend:', err);
+    setDeletingDb(true);
+
+    // 1. Optimistic UI update: immediately remove from dashboard & dismiss modal instantly
+    setProdDatabases((prev) => prev.filter((d) => d.id !== item.id && d.name !== item.name));
+    setDbToDelete(null);
+
+    // 2. Persist to local removed list so background catalog refreshes never resurrect it
+    try {
+      const raw = localStorage.getItem('mongoclone_removed_dbs');
+      const list: string[] = raw ? JSON.parse(raw) : [];
+      if (!list.includes(itemKey)) list.push(itemKey);
+      if (!list.includes(itemDbName)) list.push(itemDbName);
+      localStorage.setItem('mongoclone_removed_dbs', JSON.stringify(list));
+    } catch (e) {}
+
+    // 3. Resolve profile ID robustly (UUID has 5 hyphenated segments)
+    let profileId = (item as any).profileId;
+    if (!profileId && item.id) {
+      const parts = item.id.split('-');
+      if (parts.length >= 5) {
+        profileId = parts.slice(0, 5).join('-');
+      } else {
+        const lastHyphen = item.id.lastIndexOf(`-${item.name}`);
+        profileId = lastHyphen !== -1 ? item.id.substring(0, lastHyphen) : item.id;
       }
     }
 
-    await loadProdDatabases(false);
-    setDbToDelete(null);
+    // 4. Delete profile on backend asynchronously
+    try {
+      if (profileId) {
+        await deleteProfile(profileId);
+      }
+      if (itemDbName && itemDbName !== profileId) {
+        await deleteProfile(itemDbName);
+      }
+    } catch (err) {
+      console.error('Failed to delete profile from backend:', err);
+    } finally {
+      setDeletingDb(false);
+    }
   }
 
   function formatBytes(bytes?: number): string {
@@ -982,7 +1030,8 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
               <button
                 type="button"
                 onClick={() => setDbToDelete(null)}
-                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-750 transition-colors"
+                disabled={deletingDb}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-750 transition-colors disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -990,10 +1039,20 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
               <button
                 type="button"
                 onClick={confirmDeleteDb}
-                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-slate-950 transition-all shadow-lg shadow-rose-500/25 flex items-center gap-1.5"
+                disabled={deletingDb}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-slate-950 transition-all shadow-lg shadow-rose-500/25 flex items-center gap-1.5 disabled:opacity-50"
               >
-                <Trash2 className="w-3.5 h-3.5 fill-slate-950" />
-                <span>Remove Database</span>
+                {deletingDb ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-950" />
+                    <span>Removing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5 fill-slate-950" />
+                    <span>Remove Database</span>
+                  </>
+                )}
               </button>
             </div>
           </div>

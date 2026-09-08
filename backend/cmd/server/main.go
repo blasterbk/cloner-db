@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -494,7 +495,12 @@ func main() {
 	})))
 
 	mux.HandleFunc("/api/v1/profiles/", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Path, "/api/v1/profiles/")
+		rawID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/profiles/"), "/")
+		id := rawID
+		if unescaped, err := url.PathUnescape(rawID); err == nil {
+			id = unescaped
+		}
+		id = strings.TrimSpace(id)
 		switch r.Method {
 		case "PUT", "POST":
 			var req struct {

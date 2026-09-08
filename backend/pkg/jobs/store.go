@@ -495,23 +495,58 @@ func (s *Store) ListProfiles() []SavedProfile {
 	return list
 }
 
-// DeleteProfile deletes a connection profile from DB and local store.
+// DeleteProfile deletes a connection profile from DB and local store by ID or Name.
 func (s *Store) DeleteProfile(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.profiles[id]; ok {
-		delete(s.profiles, id)
-		s.save()
-
-		if s.profilesColl != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
-			_, _ = s.profilesColl.DeleteOne(ctx, bson.M{"id": id})
-			cancel()
-		}
-		return true
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
 	}
-	return false
+
+	foundID := ""
+	if _, ok := s.profiles[id]; ok {
+		foundID = id
+	} else {
+		// Fallback: search by Name or DB hint in URI
+		for pid, p := range s.profiles {
+			if strings.EqualFold(p.Name, id) || 
+			   strings.EqualFold(p.Config.ExtractDatabaseName(), id) ||
+			   strings.Contains(strings.ToLower(p.Name), strings.ToLower(id)) {
+				foundID = pid
+				break
+			}
+		}
+	}
+
+	deleted := false
+	if foundID != "" {
+		delete(s.profiles, foundID)
+		s.save()
+		deleted = true
+	}
+
+	if s.profilesColl != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		orFilters := []bson.M{
+			{"id": id},
+			{"_id": id},
+			{"name": id},
+		}
+		if foundID != "" && foundID != id {
+			orFilters = append(orFilters, bson.M{"id": foundID}, bson.M{"_id": foundID})
+		}
+
+		res, err := s.profilesColl.DeleteMany(ctx, bson.M{"$or": orFilters})
+		if err == nil && res.DeletedCount > 0 {
+			deleted = true
+		}
+	}
+
+	return deleted
 }
 
 // UpdateProfile updates an existing connection profile by ID or Name.
