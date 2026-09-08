@@ -183,11 +183,39 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	}
 	o.broadcastUpdate(job)
 
+	// isPausedCancel returns true if the context was cancelled due to an intentional pause
+	// (user-triggered or graceful server shutdown), NOT a real connection/runtime error.
+	isPausedCancel := func() bool {
+		if ctx.Err() == nil {
+			return false
+		}
+		o.mu.Lock()
+		_, paused := o.pausedJobs[job.ID]
+		o.mu.Unlock()
+		return paused
+	}
+
+	// pauseJobOnShutdown transitions a job to PAUSED if context was cancelled intentionally.
+	// Returns true if the job was paused (caller should return without calling failJob).
+	pauseJobOnShutdown := func(phase string) bool {
+		if !isPausedCancel() {
+			return false
+		}
+		job.SetStatus(types.StatusPaused)
+		job.AddLog("WARN", fmt.Sprintf("⚠️ Job paused during '%s' phase (server restart or user pause). Checkpoint preserved — resume when ready.", phase))
+		o.checkpointMgr.FlushCheckpoint(job.ID)
+		o.store.SaveJob(job)
+		return true
+	}
+
 	// Step 1: Pre-flight connections
 	job.SetProgressPhase("Pre-flight Check")
 	job.AddLog("INFO", fmt.Sprintf("Connecting to source: %s", job.SourceMasked))
 	sourceClient, err := mongopkg.Connect(ctx, &job.Request.Source)
 	if err != nil {
+		if pauseJobOnShutdown("Pre-flight Check") {
+			return
+		}
 		o.failJob(job, fmt.Sprintf("Failed to connect to source MongoDB: %v", err))
 		return
 	}
@@ -195,6 +223,9 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 
 	sourceLatency, err := mongopkg.Ping(ctx, sourceClient)
 	if err != nil {
+		if pauseJobOnShutdown("Pre-flight Check") {
+			return
+		}
 		o.failJob(job, fmt.Sprintf("Source MongoDB ping failed: %v", err))
 		return
 	}
@@ -203,6 +234,9 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	job.AddLog("INFO", fmt.Sprintf("Connecting to target: %s", job.TargetMasked))
 	targetClient, err := mongopkg.Connect(ctx, &job.Request.Target)
 	if err != nil {
+		if pauseJobOnShutdown("Pre-flight Check") {
+			return
+		}
 		o.failJob(job, fmt.Sprintf("Failed to connect to target MongoDB: %v", err))
 		return
 	}
@@ -210,6 +244,9 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 
 	targetLatency, err := mongopkg.Ping(ctx, targetClient)
 	if err != nil {
+		if pauseJobOnShutdown("Pre-flight Check") {
+			return
+		}
 		o.failJob(job, fmt.Sprintf("Target MongoDB ping failed: %v", err))
 		return
 	}
@@ -255,6 +292,9 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	}
 	catalog, err := mongopkg.InspectCatalog(ctx, sourceClient, false, dbHints...)
 	if err != nil {
+		if pauseJobOnShutdown("Catalog Discovery") {
+			return
+		}
 		o.failJob(job, fmt.Sprintf("Failed to inspect source catalog: %v", err))
 		return
 	}

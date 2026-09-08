@@ -1,0 +1,14 @@
+# 1. Push the new binary to your server
+cd ~/cloner-db/backend
+git pull
+go build -o mongoclone cmd/server/main.go
+
+# 2. Stop old PM2 process
+pm2 stop mongoclone
+pm2 delete mongoclone
+
+# 3. Start with the new ecosystem config (prevents memory restarts)
+pm2 start ecosystem.config.js
+
+# 4. Save so it survives server reboot
+pm2 save
