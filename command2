@@ -1,39 +1,127 @@
-# ─── Full Build + Deploy ───────────────────────────────────────────
-# Run this script on the SERVER to deploy all changes.
-# The correct build order is CRITICAL:
-#   1) Build frontend  →  2) Copy into backend/web/  →  3) Build Go binary
-# ───────────────────────────────────────────────────────────────────
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════
+#  MongoClone — Production Deploy Script
+#  Usage: bash command2   OR   chmod +x command2 && ./command2
+#
+#  Build order is CRITICAL:
+#    1) npm run build  →  2) copy to backend/web/  →  3) go build
+#  The Go embed directive reads from backend/web/, NOT frontend/dist/
+# ═══════════════════════════════════════════════════════════════
 
-cd ~/cloner-db
+set -euo pipefail   # Exit on any error, treat unset vars as errors
 
-# 1. Pull latest code
-git pull
+DEPLOY_START=$(date +%s)
+REPO_ROOT="/root/cloner-db"
+FRONTEND_DIR="$REPO_ROOT/frontend"
+BACKEND_DIR="$REPO_ROOT/backend"
+BINARY="$BACKEND_DIR/mongoclone"
+BINARY_BACKUP="$BACKEND_DIR/mongoclone.bak"
 
-# 2. Build frontend (the output goes to frontend/dist/)
-cd frontend
-npm install --silent
+echo ""
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║         MongoClone — Production Deploy               ║"
+echo "║         $(date '+%Y-%m-%d %H:%M:%S')                        ║"
+echo "╚══════════════════════════════════════════════════════╝"
+echo ""
+
+# ── 1. Pull latest code ─────────────────────────────────────
+echo "▶ [1/6] Pulling latest code..."
+cd "$REPO_ROOT"
+git pull --ff-only
+echo "   ✅ Git up to date"
+
+# ── 2. Build frontend ────────────────────────────────────────
+echo ""
+echo "▶ [2/6] Building frontend..."
+cd "$FRONTEND_DIR"
+
+# Use npm ci (faster, reproducible — uses package-lock.json exactly)
+npm ci --silent
+
 npm run build
+JS_SIZE=$(du -sh dist/assets/*.js 2>/dev/null | awk '{print $1}' | head -1)
+echo "   ✅ Frontend built  (JS bundle: ${JS_SIZE})"
 
-# 3. CRITICAL: Copy frontend dist into backend/web/ (Go embeds from HERE, not frontend/dist/)
-rm -rf ../backend/web/assets
-cp -r dist/assets ../backend/web/assets
-cp dist/index.html ../backend/web/index.html
-echo "✅ Frontend assets synced to backend/web/"
+# ── 3. Sync assets into backend/web/ (the Go embed target) ──
+echo ""
+echo "▶ [3/6] Syncing frontend assets to backend/web/..."
+rm -rf "$BACKEND_DIR/web/assets"
+cp -r dist/assets "$BACKEND_DIR/web/assets"
+cp dist/index.html "$BACKEND_DIR/web/index.html"
+echo "   ✅ Assets synced ($(ls dist/assets | wc -l | tr -d ' ') files)"
 
-# 4. Build Go binary (now embeds the new frontend from backend/web/)
-cd ../backend
-go build -o mongoclone ./cmd/server
-echo "✅ Binary built"
+# ── 4. Build Go binary ───────────────────────────────────────
+echo ""
+echo "▶ [4/6] Building Go binary..."
+cd "$BACKEND_DIR"
 
-# 5. Stop old PM2 process
-pm2 stop mongoclone
-pm2 delete mongoclone
+# Backup old binary so we can rollback if needed
+if [ -f "$BINARY" ]; then
+    cp "$BINARY" "$BINARY_BACKUP"
+fi
 
-# 6. Start with the new ecosystem config (memory limits + auth env vars)
-pm2 start ecosystem.config.js
+# -ldflags "-s -w" strips debug info → ~30% smaller binary
+go build -ldflags="-s -w" -o mongoclone ./cmd/server
 
-# 7. Save so it survives server reboot
-pm2 save
+BIN_SIZE=$(du -sh "$BINARY" | awk '{print $1}')
+echo "   ✅ Binary built  (size: ${BIN_SIZE})"
 
-# 8. Verify
-pm2 show mongoclone
+# ── 5. Zero-downtime reload via PM2 ─────────────────────────
+echo ""
+echo "▶ [5/6] Reloading service via PM2..."
+
+if pm2 describe mongoclone > /dev/null 2>&1; then
+    # Process exists → reload (zero-downtime, keeps connections alive)
+    pm2 reload ecosystem.config.js --update-env
+    echo "   ✅ PM2 reloaded (zero-downtime)"
+else
+    # First deploy → fresh start
+    pm2 start ecosystem.config.js
+    echo "   ✅ PM2 started (first deploy)"
+fi
+
+pm2 save --force > /dev/null
+echo "   ✅ PM2 state saved (survives reboot)"
+
+# ── 6. Health check ─────────────────────────────────────────
+echo ""
+echo "▶ [6/6] Running health check..."
+sleep 3   # Give it a moment to initialize
+
+for i in 1 2 3; do
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null || echo "000")
+    if [ "$HTTP_STATUS" = "200" ]; then
+        echo "   ✅ Health check passed  (HTTP $HTTP_STATUS)"
+        break
+    fi
+    echo "   ⏳ Waiting for server... attempt $i/3 (HTTP $HTTP_STATUS)"
+    sleep 3
+done
+
+if [ "$HTTP_STATUS" != "200" ]; then
+    echo ""
+    echo "   ⚠️  Server not responding after 3 attempts. Rolling back..."
+    if [ -f "$BINARY_BACKUP" ]; then
+        mv "$BINARY_BACKUP" "$BINARY"
+        pm2 reload mongoclone --update-env
+        echo "   🔄 Rolled back to previous binary"
+    fi
+    echo "   ❌ Deploy FAILED. Check logs: pm2 logs mongoclone --lines 50"
+    exit 1
+fi
+
+# ── Summary ──────────────────────────────────────────────────
+DEPLOY_END=$(date +%s)
+ELAPSED=$((DEPLOY_END - DEPLOY_START))
+
+echo ""
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║  ✅  Deploy complete in ${ELAPSED}s                        ║"
+echo "╚══════════════════════════════════════════════════════╝"
+echo ""
+pm2 show mongoclone | grep -E "status|uptime|restart|memory|version"
+echo ""
+echo "📋 Live logs:   pm2 logs mongoclone"
+echo "📊 Status:      pm2 show mongoclone"
+echo "🔄 Rollback:    cp mongoclone.bak mongoclone && pm2 reload mongoclone"
+echo ""

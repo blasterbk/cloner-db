@@ -521,8 +521,8 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
         masking_rules: undefined,
         drop_target_first: dropTargetFirst,
         preserve_indexes: preserveIndexes,
-        batch_size: 2500,
-        parallel_collections: 4,
+        batch_size: 0,          // 0 = use server default from .env (DEFAULT_BATCH_SIZE)
+        parallel_collections: 0, // 0 = use server default from .env (DEFAULT_PARALLEL_WORKERS)
         defer_indexes: true,
       };
 
