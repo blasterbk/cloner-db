@@ -4,6 +4,7 @@ import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, logoutUser }
 import { Header } from './components/Common/Header';
 import { LoginPage } from './components/Common/LoginPage';
 import { ProductionDashboard } from './components/Dashboard/ProductionDashboard';
+import { TestDashboard } from './components/Dashboard/TestDashboard';
 import { CloneHistory } from './components/History/CloneHistory';
 
 // ─── AuthGate ────────────────────────────────────────────────────────────────
@@ -42,7 +43,7 @@ interface AppProps {
 }
 
 export const App: React.FC<AppProps> = ({ onLogout }) => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'test-databases' | 'history'>('dashboard');
   const [activeJob, setActiveJob] = useState<CloneJob | null>(null);
   const [resetDashboardKey, setResetDashboardKey] = useState<number>(0);
   // WebSocket health tracking for smart polling fallback
@@ -206,7 +207,7 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
           if (tab === 'dashboard') {
             handleNavigateHome();
           } else {
-            setActiveTab(tab);
+            setActiveTab(tab as any);
           }
         }}
         activeJobsCount={activeJob?.status === 'RUNNING' ? 1 : 0}
@@ -224,6 +225,10 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
           <ProductionDashboard
             activeJob={activeJob}
             setActiveJob={setActiveJob}
+            resetKey={resetDashboardKey}
+          />
+        ) : activeTab === 'test-databases' ? (
+          <TestDashboard
             resetKey={resetDashboardKey}
           />
         ) : (

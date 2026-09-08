@@ -1,9 +1,9 @@
 import React from 'react';
-import { Database, History, LogOut, ZoomIn, ZoomOut, Monitor } from 'lucide-react';
+import { Database, History, LogOut, ZoomIn, ZoomOut, Monitor, FlaskConical } from 'lucide-react';
 
 interface HeaderProps {
-  activeTab: 'dashboard' | 'history';
-  setActiveTab: (tab: 'dashboard' | 'history') => void;
+  activeTab: 'dashboard' | 'test-databases' | 'history';
+  setActiveTab: (tab: 'dashboard' | 'test-databases' | 'history') => void;
   activeJobsCount: number;
   uiScale: number;
   setUiScale: (scale: number) => void;
@@ -98,6 +98,18 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Database className="w-3.5 h-3.5" />
             <span>Production Databases</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('test-databases')}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+              activeTab === 'test-databases'
+                ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20 font-bold'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+            }`}
+          >
+            <FlaskConical className="w-3.5 h-3.5" />
+            <span>Test Databases</span>
           </button>
 
           <button
