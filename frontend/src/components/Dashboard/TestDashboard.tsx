@@ -143,31 +143,33 @@ export const TestDashboard: React.FC<TestDashboardProps> = ({ resetKey }) => {
                 );
                 const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
 
-                dbsToShow.forEach((d) => {
-                  const displayName =
-                    dbsToShow.length === 1 && userDbName
-                      ? userDbName
-                      : userDbName && d.name.toLowerCase() === userDbName.toLowerCase()
-                      ? userDbName
-                      : d.name;
+                // For Test Databases: each profile = ONE card.
+                // Pick the physical db that matches the user's registered name (userDbName),
+                // or fall back to the first available database on that server.
+                // Do NOT create a card for every physical database on the cluster.
+                const matchingDb =
+                  dbsToShow.find((d) => d.name.toLowerCase() === userDbName.toLowerCase()) ||
+                  dbsToShow[0];
 
-                  dbList.push({
-                    id: `${item.profile.id}-${displayName}`,
-                    profileId: item.profile.id,
-                    name: displayName,
-                    actualDbName: d.name,
-                    clusterName: cleanCluster || displayName,
-                    clusterUri,
-                    sizeBytes: d.size_bytes,
-                    totalCollections: d.total_collections || d.collections?.length || 0,
-                    totalDocuments: d.total_documents || 0,
-                    collections: (d.collections || []).map((c) => ({
-                      name: c.name,
-                      docCount: c.doc_count || (c as any).docCount || 0,
-                      sizeBytes: c.storage_size_bytes || 0,
-                      indexesCount: c.indexes?.length || 0,
-                    })),
-                  });
+                const d = matchingDb;
+                const displayName = userDbName || d.name;
+
+                dbList.push({
+                  id: `${item.profile.id}-${displayName}`,
+                  profileId: item.profile.id,
+                  name: displayName,
+                  actualDbName: d.name,
+                  clusterName: cleanCluster || displayName,
+                  clusterUri,
+                  sizeBytes: d.size_bytes,
+                  totalCollections: d.total_collections || d.collections?.length || 0,
+                  totalDocuments: d.total_documents || 0,
+                  collections: (d.collections || []).map((c) => ({
+                    name: c.name,
+                    docCount: c.doc_count || (c as any).docCount || 0,
+                    sizeBytes: c.storage_size_bytes || 0,
+                    indexesCount: c.indexes?.length || 0,
+                  })),
                 });
               } else {
                 dbList.push({
@@ -216,8 +218,10 @@ export const TestDashboard: React.FC<TestDashboardProps> = ({ resetKey }) => {
         }
       }
 
+      // Deduplicate by profileId first (one card per registered profile),
+      // then fall back to name deduplication for fallback-path entries.
       const uniqueDbs = Array.from(
-        new Map(dbList.map((item) => [`${item.name}-${item.clusterUri}`, item])).values()
+        new Map(dbList.map((item) => [item.profileId || `${item.name}-${item.clusterUri}`, item])).values()
       );
       setTestDatabases(uniqueDbs);
     } catch (e) {
