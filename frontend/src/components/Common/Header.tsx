@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, History, ZoomIn, ZoomOut, Monitor } from 'lucide-react';
+import { Database, History, LogOut, ZoomIn, ZoomOut, Monitor } from 'lucide-react';
 
 interface HeaderProps {
   activeTab: 'dashboard' | 'history';
@@ -7,6 +7,7 @@ interface HeaderProps {
   activeJobsCount: number;
   uiScale: number;
   setUiScale: (scale: number) => void;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -15,6 +16,7 @@ export const Header: React.FC<HeaderProps> = ({
   activeJobsCount,
   uiScale,
   setUiScale,
+  onLogout,
 }) => {
   return (
     <header className="sticky top-0 z-40 w-full glass-panel border-b border-slate-800/80 px-4 sm:px-6 py-2.5 flex items-center justify-between">
@@ -116,6 +118,18 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </button>
         </nav>
+
+        {/* Logout button — only shown when auth is enabled (onLogout is provided) */}
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            title="Sign out"
+            className="ml-2 flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Sign out</span>
+          </button>
+        )}
       </div>
     </header>
   );

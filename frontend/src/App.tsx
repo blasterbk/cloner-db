@@ -1,17 +1,33 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CloneJob } from './types';
-import { connectTelemetryWebSocket, getJob, listJobs } from './api/client';
+import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, logoutUser } from './api/client';
 import { Header } from './components/Common/Header';
+import { LoginPage } from './components/Common/LoginPage';
 import { ProductionDashboard } from './components/Dashboard/ProductionDashboard';
 import { CloneHistory } from './components/History/CloneHistory';
 
 export const App: React.FC = () => {
+  // Auth gate — check localStorage for existing token
+  const [authToken, setAuthToken] = useState<string>(() => getAuthToken());
+
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
   const [activeJob, setActiveJob] = useState<CloneJob | null>(null);
   const [resetDashboardKey, setResetDashboardKey] = useState<number>(0);
   // WebSocket health tracking for smart polling fallback
   const [wsConnected, setWsConnected] = useState(false);
   const wsDisconnectedSince = useRef<number | null>(null);
+
+  // Show login page if not authenticated
+  if (!authToken) {
+    return (
+      <LoginPage
+        onLoginSuccess={(token) => {
+          localStorage.setItem('mongoclone_auth_token', token);
+          setAuthToken(token);
+        }}
+      />
+    );
+  }
 
   function handleNavigateHome() {
     setActiveTab('dashboard');
@@ -176,6 +192,10 @@ export const App: React.FC = () => {
         activeJobsCount={activeJob?.status === 'RUNNING' ? 1 : 0}
         uiScale={uiScale}
         setUiScale={handleSetUiScale}
+        onLogout={async () => {
+          await logoutUser();
+          setAuthToken('');
+        }}
       />
 
       {/* Main Scaled Container (Supports 60% / 80% / 100% density) */}

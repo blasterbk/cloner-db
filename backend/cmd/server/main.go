@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mongoclone/engine/pkg/auth"
 	"github.com/mongoclone/engine/pkg/clone"
 	"github.com/mongoclone/engine/pkg/jobs"
 	mongopkg "github.com/mongoclone/engine/pkg/mongo"
@@ -120,6 +121,13 @@ func main() {
 
 	orchestrator := clone.NewOrchestrator(store, hub, dataDir, defaultBatchSize, defaultParallelWorkers)
 
+	// Auth manager — credentials from .env (AUTH_USERNAME / AUTH_PASSWORD)
+	// If AUTH_USERNAME is empty, all requests pass through without authentication.
+	authMgr := auth.New(
+		os.Getenv("AUTH_USERNAME"),
+		os.Getenv("AUTH_PASSWORD"),
+	)
+
 	mux := http.NewServeMux()
 
 	// CORS Middleware Helper
@@ -151,8 +159,45 @@ func main() {
 		})
 	}))
 
-	// 2. Test MongoDB Connection
-	mux.HandleFunc("/api/v1/mongo/test-connection", cors(func(w http.ResponseWriter, r *http.Request) {
+	// 2. Auth routes — always public (no auth middleware on these)
+	mux.HandleFunc("/api/v1/auth/login", cors(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+			return
+		}
+		token, ok := authMgr.Login(body.Username, body.Password)
+		if !ok {
+			log.Printf("[auth] Failed login attempt for username: %q (remote: %s)", body.Username, r.RemoteAddr)
+			// Use 401 with a generic message to prevent username enumeration
+			jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": "Invalid username or password"})
+			return
+		}
+		log.Printf("[auth] Login successful for username: %q (remote: %s)", body.Username, r.RemoteAddr)
+		jsonResponse(w, http.StatusOK, map[string]string{"token": token})
+	}))
+
+	mux.HandleFunc("/api/v1/auth/logout", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		if strings.HasPrefix(token, "Bearer ") {
+			authMgr.Logout(strings.TrimPrefix(token, "Bearer "))
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"message": "Logged out successfully"})
+	})))
+
+	// 3. Test MongoDB Connection
+	mux.HandleFunc("/api/v1/mongo/test-connection", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -191,10 +236,10 @@ func main() {
 			"server_info": info,
 			"masked_uri":  cfg.MaskedURI(),
 		})
-	}))
+	})))
 
 	// 3. Inspect Cluster Catalog (Databases, Collections, Indexes, Sizes)
-	mux.HandleFunc("/api/v1/mongo/catalog", cors(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/mongo/catalog", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -226,10 +271,10 @@ func main() {
 		}
 
 		jsonResponse(w, http.StatusOK, catalog)
-	}))
+	})))
 
 	// 4. Inspect Oplog Window for Point-in-Time Recovery
-	mux.HandleFunc("/api/v1/mongo/oplog-window", cors(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/mongo/oplog-window", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -258,10 +303,10 @@ func main() {
 		}
 
 		jsonResponse(w, http.StatusOK, window)
-	}))
+	})))
 
 	// 4b. Overview of all saved connections (for the home page)
-	mux.HandleFunc("/api/v1/mongo/connections/overview", cors(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/mongo/connections/overview", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		profiles := store.ListProfiles()
 		type ConnOverview struct {
 			Profile      jobs.SavedProfile      `json:"profile"`
@@ -326,10 +371,10 @@ func main() {
 
 		wg.Wait()
 		jsonResponse(w, http.StatusOK, results)
-	}))
+	})))
 
 	// 5. Jobs CRUD & Launch
-	mux.HandleFunc("/api/v1/jobs", cors(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/jobs", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			list := store.ListJobs()
@@ -355,10 +400,10 @@ func main() {
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	}))
+	})))
 
 	// Specific Job Route (/api/v1/jobs/{id} and /api/v1/jobs/{id}/cancel)
-	mux.HandleFunc("/api/v1/jobs/", cors(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/jobs/", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
 		parts := strings.Split(path, "/")
 		jobID := parts[0]
@@ -421,10 +466,10 @@ func main() {
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	}))
+	})))
 
 	// 6. Profiles CRUD
-	mux.HandleFunc("/api/v1/profiles", cors(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/profiles", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			list := store.ListProfiles()
@@ -446,9 +491,9 @@ func main() {
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	}))
+	})))
 
-	mux.HandleFunc("/api/v1/profiles/", cors(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/profiles/", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/v1/profiles/")
 		switch r.Method {
 		case "PUT", "POST":
@@ -476,10 +521,11 @@ func main() {
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	}))
+	})))
 
 	// 7. WebSocket live progress endpoint
-	mux.HandleFunc("/ws", hub.ServeHTTP)
+	// Auth via ?token= query parameter (browsers can't set headers on WebSocket connections)
+	mux.HandleFunc("/ws", authMgr.Middleware(hub.ServeHTTP))
 
 	// 8. Static frontend file server (Embedded with fallback to disk)
 	var frontendFS fs.FS
@@ -598,3 +644,4 @@ func jsonResponse(w http.ResponseWriter, status int, data any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
+

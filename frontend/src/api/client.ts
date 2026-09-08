@@ -10,6 +10,42 @@ import {
 
 const API_BASE = '/api/v1';
 
+/** Returns the stored auth token (or empty string if not logged in / auth disabled). */
+export function getAuthToken(): string {
+  try { return localStorage.getItem('mongoclone_auth_token') ?? ''; } catch { return ''; }
+}
+
+/** Returns headers object with Authorization Bearer token when a token exists. */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const token = getAuthToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extra };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+/** Auth API */
+export async function loginUser(
+  username: string,
+  password: string
+): Promise<{ token?: string; error?: string }> {
+  const res = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  return res.json();
+}
+
+export async function logoutUser(): Promise<void> {
+  const token = getAuthToken();
+  if (!token) return;
+  await fetch(`${API_BASE}/auth/logout`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => {});
+  localStorage.removeItem('mongoclone_auth_token');
+}
+
 export async function testConnection(config: EndpointConfig): Promise<{
   success: boolean;
   server_info?: ServerInfo;
@@ -18,7 +54,7 @@ export async function testConnection(config: EndpointConfig): Promise<{
 }> {
   const res = await fetch(`${API_BASE}/mongo/test-connection`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify(config),
   });
   return res.json();
@@ -30,11 +66,8 @@ export async function fetchCatalog(
 ): Promise<ClusterCatalog> {
   const res = await fetch(`${API_BASE}/mongo/catalog`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      config,
-      include_system_dbs: includeSystemDBs,
-    }),
+    headers: authHeaders(),
+    body: JSON.stringify({ config, include_system_dbs: includeSystemDBs }),
   });
   if (!res.ok) {
     const err = await res.json();
@@ -50,17 +83,17 @@ export async function fetchConnectionsOverview(): Promise<Array<{
   catalog?: ClusterCatalog;
   error?: string;
 }>> {
-  const res = await fetch(`${API_BASE}/mongo/connections/overview`);
+  const res = await fetch(`${API_BASE}/mongo/connections/overview`, {
+    headers: authHeaders(),
+  });
   if (!res.ok) throw new Error('Failed to fetch connections overview');
   return res.json();
 }
 
-export async function fetchOplogWindow(
-  config: EndpointConfig
-): Promise<OplogWindow> {
+export async function fetchOplogWindow(config: EndpointConfig): Promise<OplogWindow> {
   const res = await fetch(`${API_BASE}/mongo/oplog-window`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify(config),
   });
   if (!res.ok) {
@@ -70,12 +103,10 @@ export async function fetchOplogWindow(
   return res.json();
 }
 
-export async function startCloneJob(
-  request: CloneJobRequest
-): Promise<CloneJob> {
+export async function startCloneJob(request: CloneJobRequest): Promise<CloneJob> {
   const res = await fetch(`${API_BASE}/jobs`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify(request),
   });
   if (!res.ok) {
@@ -86,13 +117,13 @@ export async function startCloneJob(
 }
 
 export async function listJobs(): Promise<CloneJob[]> {
-  const res = await fetch(`${API_BASE}/jobs`);
+  const res = await fetch(`${API_BASE}/jobs`, { headers: authHeaders() });
   if (!res.ok) throw new Error('Failed to fetch jobs list');
   return res.json();
 }
 
 export async function getJob(id: string): Promise<CloneJob> {
-  const res = await fetch(`${API_BASE}/jobs/${id}`);
+  const res = await fetch(`${API_BASE}/jobs/${id}`, { headers: authHeaders() });
   if (!res.ok) throw new Error('Job not found');
   return res.json();
 }
@@ -100,6 +131,7 @@ export async function getJob(id: string): Promise<CloneJob> {
 export async function cancelJob(id: string): Promise<boolean> {
   const res = await fetch(`${API_BASE}/jobs/${id}/cancel`, {
     method: 'POST',
+    headers: authHeaders(),
   });
   const data = await res.json();
   return data.cancelled;
@@ -108,6 +140,7 @@ export async function cancelJob(id: string): Promise<boolean> {
 export async function pauseJob(id: string): Promise<boolean> {
   const res = await fetch(`${API_BASE}/jobs/${id}/pause`, {
     method: 'POST',
+    headers: authHeaders(),
   });
   const data = await res.json();
   return data.paused;
@@ -116,13 +149,14 @@ export async function pauseJob(id: string): Promise<boolean> {
 export async function deleteJob(id: string): Promise<boolean> {
   const res = await fetch(`${API_BASE}/jobs/${id}`, {
     method: 'DELETE',
+    headers: authHeaders(),
   });
   const data = await res.json();
   return data.deleted;
 }
 
 export async function listProfiles(): Promise<SavedProfile[]> {
-  const res = await fetch(`${API_BASE}/profiles`);
+  const res = await fetch(`${API_BASE}/profiles`, { headers: authHeaders() });
   if (!res.ok) return [];
   return res.json();
 }
@@ -134,7 +168,7 @@ export async function saveProfile(
 ): Promise<SavedProfile> {
   const res = await fetch(`${API_BASE}/profiles`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify({ name, type, config }),
   });
   return res.json();
@@ -148,7 +182,7 @@ export async function updateProfile(
 ): Promise<SavedProfile> {
   const res = await fetch(`${API_BASE}/profiles/${id}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify({ name, config }),
   });
   if (!res.ok) throw new Error('Failed to update profile');
@@ -158,6 +192,7 @@ export async function updateProfile(
 export async function resumeJob(id: string): Promise<{ resumed: boolean }> {
   const res = await fetch(`${API_BASE}/jobs/${id}/resume`, {
     method: 'POST',
+    headers: authHeaders(),
   });
   if (!res.ok) {
     const err = await res.json();
@@ -169,6 +204,7 @@ export async function resumeJob(id: string): Promise<{ resumed: boolean }> {
 export async function deleteProfile(id: string): Promise<boolean> {
   const res = await fetch(`${API_BASE}/profiles/${id}`, {
     method: 'DELETE',
+    headers: authHeaders(),
   });
   const data = await res.json();
   return data.deleted;
@@ -181,7 +217,9 @@ export function connectTelemetryWebSocket(
   onClose?: () => void
 ): () => void {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/ws`;
+  // Pass auth token as query param — browsers can't set custom headers on WebSocket connections
+  const token = getAuthToken();
+  const wsUrl = `${protocol}//${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 
   let ws: WebSocket | null = null;
   let isClosed = false;
@@ -190,9 +228,7 @@ export function connectTelemetryWebSocket(
   function connect() {
     ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => {
-      onOpen?.();
-    };
+    ws.onopen = () => { onOpen?.(); };
 
     ws.onmessage = (event) => {
       try {
@@ -210,9 +246,7 @@ export function connectTelemetryWebSocket(
       }
     };
 
-    ws.onerror = () => {
-      ws?.close();
-    };
+    ws.onerror = () => { ws?.close(); };
   }
 
   connect();

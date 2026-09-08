@@ -57,6 +57,12 @@ module.exports = {
         DEFAULT_BATCH_SIZE: '5000',      // docs per InsertMany batch (range: 1000–20000)
         DEFAULT_PARALLEL_WORKERS: '6',   // parallel collection workers (range: 1–16)
 
+        // --- Authentication ---
+        // Must match AUTH_USERNAME / AUTH_PASSWORD in .env
+        // Leave AUTH_USERNAME empty string to disable login page
+        AUTH_USERNAME: 'admin',
+        AUTH_PASSWORD: 'A7$Fe]bZyMBB9%!p',
+
         // --- Optional CPU throttling (uncomment if this server runs other workloads) ---
         // GOMAXPROCS: '2',    // Limit Go to 2 OS threads instead of all 4 cores
         // DATA_DIR: 'data',
