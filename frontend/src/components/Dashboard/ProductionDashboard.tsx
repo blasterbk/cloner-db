@@ -130,7 +130,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
             .filter((item) => item.profile.type === 'source')
             .forEach((item) => {
               const clusterUri = item.profile.config.uri || '';
-              const clusterName = item.profile.name;
+              const profileRawName = item.profile.name || '';
 
               const extractDbFromUri = (uri: string): string => {
                 try {
@@ -152,10 +152,28 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
                 return name.trim();
               };
 
+              const extractClusterFromProfile = (name: string, dbName: string): string => {
+                const match = name.match(/^(.*?)\s*\(([^)]+)\)$/);
+                if (match) {
+                  const c = match[1].trim();
+                  const inner = match[2].trim();
+                  if (c && c.toLowerCase() !== inner.toLowerCase() && c.toLowerCase() !== dbName.toLowerCase()) {
+                    return c;
+                  }
+                }
+                if (name && name.toLowerCase() !== dbName.toLowerCase() && !name.includes('(')) {
+                  return name;
+                }
+                return '';
+              };
+
+              const userDbName = extractDbFromProfile(profileRawName);
+              const cleanCluster = extractClusterFromProfile(profileRawName, userDbName);
+
               const fallbackDbName =
+                userDbName ||
                 extractDbFromUri(clusterUri) ||
-                extractDbFromProfile(clusterName) ||
-                clusterName ||
+                profileRawName ||
                 'database';
 
               if (item.catalog?.databases && item.catalog.databases.length > 0) {
@@ -165,11 +183,21 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
                 const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
 
                 dbsToShow.forEach((d) => {
+                  // If there is only 1 DB on this connection profile, or if d.name matches userDbName:
+                  // The user custom configured this database profile as `userDbName` (e.g. "test-google-8").
+                  // Never overwrite userDbName with the physical cluster db name ("ag-google").
+                  const displayName = (dbsToShow.length === 1 && userDbName)
+                    ? userDbName
+                    : (userDbName && d.name.toLowerCase() === userDbName.toLowerCase())
+                    ? userDbName
+                    : d.name;
+
                   dbList.push({
-                    id: `${item.profile.id}-${d.name}`,
+                    id: `${item.profile.id}-${displayName}`,
                     profileId: item.profile.id,
-                    name: d.name,
-                    clusterName,
+                    name: displayName,
+                    actualDbName: d.name,
+                    clusterName: cleanCluster || displayName,
                     clusterUri,
                     sizeBytes: d.size_bytes,
                     totalCollections: d.total_collections || d.collections?.length || 0,
@@ -188,7 +216,8 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
                   id: `${item.profile.id}-${fallbackDbName}`,
                   profileId: item.profile.id,
                   name: fallbackDbName,
-                  clusterName,
+                  actualDbName: fallbackDbName,
+                  clusterName: cleanCluster || fallbackDbName,
                   clusterUri,
                   sizeBytes: 0,
                   totalCollections: 0,
@@ -216,6 +245,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
               id: `${p.id}-${dbName}`,
               profileId: p.id,
               name: dbName,
+              actualDbName: dbName,
               clusterName: p.name,
               clusterUri: uri,
               sizeBytes: 0,
@@ -236,7 +266,11 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
       // Keep selected database updated if already selected by user
       if (selectedDbForClone) {
-        const match = uniqueDbs.find((d) => d.name.toLowerCase() === selectedDbForClone.name.toLowerCase());
+        const match = uniqueDbs.find(
+          (d) =>
+            d.name.toLowerCase() === selectedDbForClone.name.toLowerCase() ||
+            (d.actualDbName && d.actualDbName.toLowerCase() === selectedDbForClone.name.toLowerCase())
+        );
         if (match) {
           setSelectedDbForClone(match);
         }
@@ -283,23 +317,23 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
     try {
       const db = newDbName.trim();
-      let uriToSave = newUri.trim();
-
-      // Ensure URI contains the database path if user just entered mongodb://host:port or mongodb://host:port/
-      const qIndex = uriToSave.indexOf('?');
-      const baseUri = qIndex !== -1 ? uriToSave.substring(0, qIndex) : uriToSave;
-      const queryParams = qIndex !== -1 ? uriToSave.substring(qIndex) : '';
-
-      const lastSlash = baseUri.lastIndexOf('/');
-      if (lastSlash !== -1) {
-        const afterSlash = baseUri.substring(lastSlash + 1);
-        if (!afterSlash || afterSlash === 'admin') {
-          uriToSave = `${baseUri.replace(/\/+$/, '')}/${encodeURIComponent(db)}${queryParams}`;
+      let cluster = newClusterName.trim();
+      if (cluster.toLowerCase() === db.toLowerCase() || cluster === `${db} (${db})`) {
+        cluster = '';
+      } else {
+        const match = cluster.match(/^(.*?)\s*\(([^)]+)\)$/);
+        if (match) {
+          const prefix = match[1].trim();
+          const inner = match[2].trim();
+          if (prefix.toLowerCase() === db.toLowerCase() || inner.toLowerCase() === db.toLowerCase() || prefix.toLowerCase() === inner.toLowerCase()) {
+            cluster = prefix.toLowerCase() === db.toLowerCase() ? '' : prefix;
+          }
         }
       }
 
-      const name = newClusterName.trim() ? `${newClusterName.trim()} (${db})` : db;
-      const saved = await saveProfile(name, 'source', { uri: uriToSave });
+      const uriToSave = newUri.trim();
+      const profileName = cluster ? `${cluster} (${db})` : db;
+      const saved = await saveProfile(profileName, 'source', { uri: uriToSave });
       if (!saved || (saved as any).error) {
         throw new Error((saved as any)?.error || 'Server failed to save database profile');
       }
@@ -309,7 +343,8 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
         id: `${saved.id || Date.now()}-${db}`,
         profileId: saved.id,
         name: db,
-        clusterName: newClusterName.trim() || db,
+        actualDbName: db,
+        clusterName: cluster || db,
         clusterUri: uriToSave,
         sizeBytes: 0,
         totalCollections: 0,
@@ -336,7 +371,22 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   function handleOpenEditDb(item: ProdDatabaseItem) {
     setEditingDb(item);
     setEditDbName(item.name);
-    setEditClusterName(item.clusterName);
+    let displayCluster = item.clusterName || '';
+    if (displayCluster.toLowerCase() === item.name.toLowerCase() || displayCluster === `${item.name} (${item.name})`) {
+      displayCluster = '';
+    } else {
+      const match = displayCluster.match(/^(.*?)\s*\(([^)]+)\)$/);
+      if (match) {
+        const prefix = match[1].trim();
+        const inner = match[2].trim();
+        if (prefix.toLowerCase() === item.name.toLowerCase() || inner.toLowerCase() === item.name.toLowerCase() || prefix.toLowerCase() === inner.toLowerCase()) {
+          displayCluster = prefix.toLowerCase() === item.name.toLowerCase() ? '' : prefix;
+        } else {
+          displayCluster = prefix;
+        }
+      }
+    }
+    setEditClusterName(displayCluster);
     setEditUri(item.clusterUri);
     setEditTestResult(null);
     setIsEditModalOpen(true);
@@ -366,7 +416,22 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     }
 
     try {
-      const name = editClusterName.trim() ? `${editClusterName.trim()} (${editDbName.trim()})` : editDbName.trim();
+      const db = editDbName.trim();
+      let cluster = editClusterName.trim();
+      if (cluster.toLowerCase() === db.toLowerCase() || cluster === `${db} (${db})`) {
+        cluster = '';
+      } else {
+        const match = cluster.match(/^(.*?)\s*\(([^)]+)\)$/);
+        if (match) {
+          const prefix = match[1].trim();
+          const inner = match[2].trim();
+          if (prefix.toLowerCase() === db.toLowerCase() || inner.toLowerCase() === db.toLowerCase() || prefix.toLowerCase() === inner.toLowerCase()) {
+            cluster = prefix.toLowerCase() === db.toLowerCase() ? '' : prefix;
+          }
+        }
+      }
+
+      const name = cluster ? `${cluster} (${db})` : db;
       const profileId = (editingDb as any).profileId || editingDb.id.split('-')[0];
       if (profileId) {
         try {
@@ -376,11 +441,25 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
         }
       }
 
-      await loadProdDatabases(false);
-
       setIsEditModalOpen(false);
       setEditingDb(null);
       setEditTestResult(null);
+
+      // Optimistically update database list
+      setProdDatabases((prev) =>
+        prev.map((item) =>
+          item.id === editingDb.id || item.profileId === profileId
+            ? {
+                ...item,
+                name: db,
+                clusterName: cluster || db,
+                clusterUri: editUri.trim(),
+              }
+            : item
+        )
+      );
+
+      await loadProdDatabases(false);
     } catch (e: any) {
       alert(`Failed to save changes: ${e.message}`);
     }
@@ -622,7 +701,9 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
             const isJobForDb = Boolean(
               activeJob &&
               activeJob.request?.databases?.some(
-                (d) => d.source_database.toLowerCase() === item.name.toLowerCase()
+                (d) =>
+                  d.source_database.toLowerCase() === item.name.toLowerCase() ||
+                  (item.actualDbName && d.source_database.toLowerCase() === item.actualDbName.toLowerCase())
               )
             );
             const isPausedForDb = isJobForDb && activeJob?.status === 'PAUSED';
@@ -821,22 +902,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
                   type="text"
                   placeholder="mongodb://user:password@host:27017/admin"
                   value={newUri}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setNewUri(val);
-                    if (!newDbName.trim()) {
-                      try {
-                        const u = val.split('?')[0].replace(/\/+$/, '');
-                        const lastSlash = u.lastIndexOf('/');
-                        if (lastSlash !== -1) {
-                          const sub = u.substring(lastSlash + 1);
-                          if (sub && sub !== 'admin' && !sub.includes('@') && !sub.includes(':')) {
-                            setNewDbName(sub);
-                          }
-                        }
-                      } catch {}
-                    }
-                  }}
+                  onChange={(e) => setNewUri(e.target.value)}
                   className="w-full glass-input px-3.5 py-2.5 rounded-xl font-mono text-xs"
                 />
               </div>

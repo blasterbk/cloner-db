@@ -41,6 +41,7 @@ export interface ProdDatabaseItem {
   id: string;
   profileId?: string;
   name: string;
+  actualDbName?: string;
   clusterName: string;
   clusterUri: string;
   sizeBytes: number;
@@ -509,7 +510,7 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
         target: { uri: targetUri, timeout_ms: 10000 },
         databases: [
           {
-            source_database: db.name,
+            source_database: db.actualDbName || db.name,
             target_database: targetDbName.trim(),
             all_collections: selectedCollections.length === collectionsList.length,
             collections: selectedCollections,
