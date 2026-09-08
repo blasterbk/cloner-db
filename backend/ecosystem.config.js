@@ -1,7 +1,7 @@
 // PM2 Ecosystem Config for MongoClone
 // Deploy with: pm2 start ecosystem.config.js
-// Reload with: pm2 reload mongoclone
-// Stop with:   pm2 stop mongoclone (this sends SIGTERM → graceful pause of running jobs)
+// Reload with: pm2 reload mongoclone  
+// Stop with:   pm2 stop mongoclone  (sends SIGTERM → graceful pause of running jobs)
 
 module.exports = {
   apps: [
@@ -10,38 +10,46 @@ module.exports = {
       script: './mongoclone',
 
       // --- Process Management ---
-      // CRITICAL: Do NOT auto-restart on exit code 0 (clean shutdown)
-      // PM2 restarts only on crash (non-zero exit).
       autorestart: true,
-      watch: false,              // NEVER watch files — causes constant restarts during clones
+      watch: false,        // NEVER enable watch — causes constant restarts during clones
       ignore_watch: ['*'],
 
-      // --- Memory: IMPORTANT for large clones ---
-      // Large MongoDB clones (30M+ docs) consume significant RAM during batch buffering.
-      // Default PM2 max_memory_restart is 1.5GB — TOO LOW for large migrations.
-      // Set to 0 (disabled) so PM2 never restarts mid-clone due to memory pressure.
-      max_memory_restart: 0,
+      // --- Memory: CRITICAL for large clones ---
+      // Large MongoDB migrations (30M+ docs) need 2-4GB RAM due to:
+      //   - Batch buffers: 4 workers × 4 queue slots × 2500 docs × avg doc size
+      //   - Go GC headroom: the live heap + GC overhead can be 2-3x live data
+      //   - MongoDB driver internal caching and cursor buffers
+      //
+      // Setting max_memory_restart to '4G' prevents PM2 from killing mid-clone.
+      // Adjust upward if your server has more RAM and clones are larger.
+      max_memory_restart: '4G',
 
       // --- Graceful Shutdown ---
-      // Give mongoclone enough time to:
-      //   1. Flush checkpoints to MongoDB (up to 5s)
-      //   2. Drain in-flight HTTP connections (up to 15s)
-      kill_timeout: 25000,       // 25 seconds before SIGKILL (default is 1600ms — WAY too short)
-      shutdown_with_message: false,
+      // IMPORTANT: mongoclone needs time to flush checkpoints before dying.
+      //   1. Pause all running jobs + write checkpoints to MongoDB (~2-5s)
+      //   2. Drain in-flight HTTP connections (~15s max in graceful shutdown code)
+      // Give 25 seconds before SIGKILL (PM2 default is only 1.6s — far too short).
+      kill_timeout: 25000,
+      kill_signal: 'SIGTERM',
       listen_timeout: 8000,
 
-      // --- Signal Configuration ---
-      kill_signal: 'SIGTERM',    // pm2 stop/restart sends SIGTERM → graceful pause
-
       // --- Restart Policy ---
-      restart_delay: 2000,       // Wait 2s before restarting after crash
-      max_restarts: 10,          // Stop restarting after 10 consecutive failures
-      min_uptime: '10s',         // Consider process stable after 10s
+      restart_delay: 3000,     // Wait 3s before restart after crash
+      max_restarts: 10,        // Stop trying after 10 consecutive failures
+      min_uptime: '10s',       // Treat process as stable after 10s
 
-      // --- Environment ---
+      // --- Go GC Tuning ---
+      // GOGC=50 makes Go collect garbage twice as frequently (50% heap growth trigger
+      // instead of default 100%). This keeps peak RSS lower at the cost of ~5-10%
+      // more CPU. Critical for large clone jobs to avoid memory spikes.
+      //
+      // GOMEMLIMIT sets a soft memory cap — Go will GC more aggressively when
+      // approaching this limit. Set to ~80% of max_memory_restart to keep headroom.
       env: {
         NODE_ENV: 'production',
         PORT: '8080',
+        GOGC: '50',
+        GOMEMLIMIT: '3GiB',
         // DATA_DIR: 'data',
         // PROFILES_DB_URI: 'mongodb://...',
       },

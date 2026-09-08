@@ -96,7 +96,9 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		numWorkers = 4
 	}
 
-	batchChan := make(chan docBatch, numWorkers*4)
+	// Buffer size: numWorkers*2 keeps workers saturated without holding excess docs in RAM.
+	// Reduced from numWorkers*4 to lower peak RSS for large (30M+ doc) clone jobs.
+	batchChan := make(chan docBatch, numWorkers*2)
 	var transferredDocs int64
 	var transferredBytes int64
 	var workerWg sync.WaitGroup
