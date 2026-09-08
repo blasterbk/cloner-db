@@ -171,6 +171,10 @@ export async function saveProfile(
     headers: authHeaders(),
     body: JSON.stringify({ name, type, config }),
   });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to save profile (${res.status})`);
+  }
   return res.json();
 }
 

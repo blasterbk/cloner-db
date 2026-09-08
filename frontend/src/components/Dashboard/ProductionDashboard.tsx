@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { fetchConnectionsOverview, saveProfile, updateProfile, deleteProfile, testConnection, fetchCatalog, cancelJob } from '../../api/client';
+import { fetchConnectionsOverview, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, fetchCatalog, cancelJob } from '../../api/client';
 import { ProdDatabaseItem, SideBySideCloneView } from '../Clone/SideBySideCloneView';
 import { CloneJob } from '../../types';
 import {
@@ -108,6 +108,10 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   }
 
   useEffect(() => {
+    // Clear any stale removed database tombstones from local storage
+    try {
+      localStorage.removeItem('mongoclone_removed_dbs');
+    } catch (e) {}
     // Non-blocking background sync
     loadProdDatabases(false);
   }, []);
@@ -116,95 +120,118 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     if (showSpinner) setRefreshing(true);
     setLoading(true);
     try {
-      const data = await fetchConnectionsOverview();
       const dbList: ProdDatabaseItem[] = [];
 
-      if (data && data.length > 0) {
-        data
-          .filter((item) => item.profile.type === 'source')
-          .forEach((item) => {
-            const clusterUri = item.profile.config.uri || '';
-            const clusterName = item.profile.name;
+      // 1. Primary: Fetch live connection inspection overview
+      try {
+        const data = await fetchConnectionsOverview();
+        if (data && data.length > 0) {
+          data
+            .filter((item) => item.profile.type === 'source')
+            .forEach((item) => {
+              const clusterUri = item.profile.config.uri || '';
+              const clusterName = item.profile.name;
 
-            const extractDbFromUri = (uri: string): string => {
-              try {
-                const u = uri.split('?')[0].replace(/\/+$/, '');
-                const lastSlash = u.lastIndexOf('/');
-                if (lastSlash !== -1) {
-                  const sub = u.substring(lastSlash + 1);
-                  if (sub && sub !== 'admin' && !sub.includes('@') && !sub.includes(':')) {
-                    return sub;
+              const extractDbFromUri = (uri: string): string => {
+                try {
+                  const u = uri.split('?')[0].replace(/\/+$/, '');
+                  const lastSlash = u.lastIndexOf('/');
+                  if (lastSlash !== -1) {
+                    const sub = u.substring(lastSlash + 1);
+                    if (sub && sub !== 'admin' && !sub.includes('@') && !sub.includes(':')) {
+                      return sub;
+                    }
                   }
-                }
-              } catch {}
-              return '';
-            };
+                } catch {}
+                return '';
+              };
 
-            const extractDbFromProfile = (name: string): string => {
-              const match = name.match(/\(([^)]+)\)$/);
-              if (match && match[1]) return match[1].trim();
-              return name.trim();
-            };
+              const extractDbFromProfile = (name: string): string => {
+                const match = name.match(/\(([^)]+)\)$/);
+                if (match && match[1]) return match[1].trim();
+                return name.trim();
+              };
 
-            const fallbackDbName =
-              extractDbFromUri(clusterUri) ||
-              extractDbFromProfile(clusterName) ||
-              clusterName ||
-              'database';
+              const fallbackDbName =
+                extractDbFromUri(clusterUri) ||
+                extractDbFromProfile(clusterName) ||
+                clusterName ||
+                'database';
 
-            if (item.catalog?.databases && item.catalog.databases.length > 0) {
-              // Ignore phantom 0-collection databases if at least one real database with collections/data exists for this connection
-              const realDbs = item.catalog.databases.filter(
-                (d) => (d.collections && d.collections.length > 0) || d.size_bytes > 0 || (d.total_collections || 0) > 0
-              );
-              const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
+              if (item.catalog?.databases && item.catalog.databases.length > 0) {
+                const realDbs = item.catalog.databases.filter(
+                  (d) => (d.collections && d.collections.length > 0) || d.size_bytes > 0 || (d.total_collections || 0) > 0
+                );
+                const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
 
-              dbsToShow.forEach((d) => {
+                dbsToShow.forEach((d) => {
+                  dbList.push({
+                    id: `${item.profile.id}-${d.name}`,
+                    profileId: item.profile.id,
+                    name: d.name,
+                    clusterName,
+                    clusterUri,
+                    sizeBytes: d.size_bytes,
+                    totalCollections: d.total_collections || d.collections?.length || 0,
+                    totalDocuments: d.total_documents || 0,
+                    collections: (d.collections || []).map((c) => ({
+                      name: c.name,
+                      docCount: c.doc_count || (c as any).docCount || 0,
+                      sizeBytes: c.storage_size_bytes || 0,
+                      indexesCount: c.indexes?.length || 0,
+                    })),
+                  });
+                });
+              } else {
+                // Fallback: If catalog inspection is empty or offline, still register the database card!
                 dbList.push({
-                  id: `${item.profile.id}-${d.name}`,
+                  id: `${item.profile.id}-${fallbackDbName}`,
                   profileId: item.profile.id,
-                  name: d.name,
+                  name: fallbackDbName,
                   clusterName,
                   clusterUri,
-                  sizeBytes: d.size_bytes,
-                  totalCollections: d.total_collections || d.collections?.length || 0,
-                  totalDocuments: d.total_documents || 0,
-                  collections: (d.collections || []).map((c) => ({
-                    name: c.name,
-                    docCount: c.doc_count || (c as any).docCount || 0,
-                    sizeBytes: c.storage_size_bytes || 0,
-                    indexesCount: c.indexes?.length || 0,
-                  })),
+                  sizeBytes: 0,
+                  totalCollections: 0,
+                  totalDocuments: 0,
+                  collections: [],
                 });
-              });
-            } else {
-              // Fallback: If catalog didn't return any databases (e.g. network timeout, non-admin user, or brand new empty DB),
-              // still register the database card so it is clearly visible and selectable on the dashboard!
-              dbList.push({
-                id: `${item.profile.id}-${fallbackDbName}`,
-                profileId: item.profile.id,
-                name: fallbackDbName,
-                clusterName,
-                clusterUri,
-                sizeBytes: 0,
-                totalCollections: 0,
-                totalDocuments: 0,
-                collections: [],
-              });
-            }
-          });
+              }
+            });
+        }
+      } catch (overviewErr) {
+        console.warn('Live connections overview unavailable, falling back to profiles:', overviewErr);
       }
 
-      // Filter out databases explicitly removed by the user
-      let removedList: string[] = [];
-      try {
-        const raw = localStorage.getItem('mongoclone_removed_dbs');
-        if (raw) removedList = JSON.parse(raw);
-      } catch (e) {}
+      // 2. Secondary Fallback: If live overview returned 0 source DBs, query raw saved profiles!
+      // This ensures newly registered DBs or DBs with slow connections always render on the dashboard.
+      if (dbList.length === 0) {
+        try {
+          const rawProfiles = await listProfiles();
+          const sources = rawProfiles.filter((p) => p.type === 'source');
+          sources.forEach((p) => {
+            const uri = p.config?.uri || '';
+            const match = p.name.match(/\(([^)]+)\)$/);
+            const dbName = match ? match[1].trim() : p.name.trim();
+            dbList.push({
+              id: `${p.id}-${dbName}`,
+              profileId: p.id,
+              name: dbName,
+              clusterName: p.name,
+              clusterUri: uri,
+              sizeBytes: 0,
+              totalCollections: 0,
+              totalDocuments: 0,
+              collections: [],
+            });
+          });
+        } catch (profileErr) {
+          console.error('Failed to load fallback profiles:', profileErr);
+        }
+      }
 
       const uniqueDbs = Array.from(
         new Map(dbList.map((item) => [`${item.name}-${item.clusterUri}`, item])).values()
-      ).filter((d) => !removedList.includes(`${d.name}@${d.clusterUri}`) && !removedList.includes(d.name));
+      );
       setProdDatabases(uniqueDbs);
 
       // Keep selected database updated if already selected by user
@@ -216,7 +243,6 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       }
     } catch (e) {
       console.error('Failed to load production databases:', e);
-      setProdDatabases([]);
     } finally {
       setRefreshing(false);
       setLoading(false);
@@ -273,25 +299,33 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       }
 
       const name = newClusterName.trim() ? `${newClusterName.trim()} (${db})` : db;
-      await saveProfile(name, 'source', { uri: uriToSave });
-      
-      // Clear any removed database tombstone if user is re-adding it
-      try {
-        const raw = localStorage.getItem('mongoclone_removed_dbs');
-        if (raw) {
-          const list: string[] = JSON.parse(raw);
-          const updated = list.filter((x) => x !== db && !x.startsWith(`${db}@`));
-          localStorage.setItem('mongoclone_removed_dbs', JSON.stringify(updated));
-        }
-      } catch (e) {}
+      const saved = await saveProfile(name, 'source', { uri: uriToSave });
+      if (!saved || (saved as any).error) {
+        throw new Error((saved as any)?.error || 'Server failed to save database profile');
+      }
 
-      await loadProdDatabases(false);
+      // Optimistically show database card on the dashboard immediately!
+      const newCard: ProdDatabaseItem = {
+        id: `${saved.id || Date.now()}-${db}`,
+        profileId: saved.id,
+        name: db,
+        clusterName: newClusterName.trim() || db,
+        clusterUri: uriToSave,
+        sizeBytes: 0,
+        totalCollections: 0,
+        totalDocuments: 0,
+        collections: [],
+      };
+      setProdDatabases((prev) => [newCard, ...prev.filter((d) => d.name.toLowerCase() !== db.toLowerCase())]);
 
       setIsAddModalOpen(false);
       setNewDbName('');
       setNewClusterName('');
       setNewUri('');
       setTestResult(null);
+
+      // Trigger background sync to populate collection stats & sizes
+      loadProdDatabases(false);
     } catch (e: any) {
       alert(`Failed to save database: ${e.message}`);
     } finally {
@@ -363,15 +397,6 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     // 1. Optimistic UI update: immediately remove from dashboard & dismiss modal instantly
     setProdDatabases((prev) => prev.filter((d) => d.id !== item.id && d.name !== item.name));
     setDbToDelete(null);
-
-    // 2. Persist to local removed list so background catalog refreshes never resurrect it
-    try {
-      const raw = localStorage.getItem('mongoclone_removed_dbs');
-      const list: string[] = raw ? JSON.parse(raw) : [];
-      if (!list.includes(itemKey)) list.push(itemKey);
-      if (!list.includes(itemDbName)) list.push(itemDbName);
-      localStorage.setItem('mongoclone_removed_dbs', JSON.stringify(list));
-    } catch (e) {}
 
     // 3. Resolve profile ID robustly (UUID has 5 hyphenated segments)
     let profileId = (item as any).profileId;
