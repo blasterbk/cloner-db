@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -101,7 +102,23 @@ func main() {
 		}
 	}
 
-	orchestrator := clone.NewOrchestrator(store, hub, dataDir)
+	// Read performance tuning defaults from .env
+	defaultBatchSize := 0
+	if v := os.Getenv("DEFAULT_BATCH_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			defaultBatchSize = n
+			log.Printf("[env] Default batch size: %d docs/batch", defaultBatchSize)
+		}
+	}
+	defaultParallelWorkers := 0
+	if v := os.Getenv("DEFAULT_PARALLEL_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			defaultParallelWorkers = n
+			log.Printf("[env] Default parallel workers: %d", defaultParallelWorkers)
+		}
+	}
+
+	orchestrator := clone.NewOrchestrator(store, hub, dataDir, defaultBatchSize, defaultParallelWorkers)
 
 	mux := http.NewServeMux()
 

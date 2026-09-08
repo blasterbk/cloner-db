@@ -12,3 +12,6 @@ pm2 start ecosystem.config.js
 
 # 4. Save so it survives server reboot
 pm2 save
+
+# Verify the new memory limit is applied
+pm2 show mongoclone

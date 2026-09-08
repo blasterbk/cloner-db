@@ -27,6 +27,10 @@ type Orchestrator struct {
 	hub           *ws.Hub
 	checkpointMgr *CheckpointManager
 
+	// Performance defaults (overridable from .env via DEFAULT_BATCH_SIZE / DEFAULT_PARALLEL_WORKERS)
+	defaultBatchSize       int
+	defaultParallelWorkers int
+
 	// Active running job cancel funcs & pause state
 	mu          sync.Mutex
 	cancelFuncs map[string]context.CancelFunc
@@ -34,7 +38,9 @@ type Orchestrator struct {
 }
 
 // NewOrchestrator creates a new Orchestrator instance.
-func NewOrchestrator(store *jobs.Store, hub *ws.Hub, dataDir string) *Orchestrator {
+// defaultBatchSize and defaultParallelWorkers are read from .env and used as fallbacks
+// when a job request does not explicitly set these values.
+func NewOrchestrator(store *jobs.Store, hub *ws.Hub, dataDir string, defaultBatchSize, defaultParallelWorkers int) *Orchestrator {
 	if dataDir == "" {
 		dataDir = "data"
 	}
@@ -43,11 +49,13 @@ func NewOrchestrator(store *jobs.Store, hub *ws.Hub, dataDir string) *Orchestrat
 		checkColl = db.Collection("mongoclone_checkpoints")
 	}
 	return &Orchestrator{
-		store:         store,
-		hub:           hub,
-		checkpointMgr: NewCheckpointManager(dataDir, checkColl),
-		cancelFuncs:   make(map[string]context.CancelFunc),
-		pausedJobs:    make(map[string]bool),
+		store:                  store,
+		hub:                    hub,
+		checkpointMgr:          NewCheckpointManager(dataDir, checkColl),
+		defaultBatchSize:       defaultBatchSize,
+		defaultParallelWorkers: defaultParallelWorkers,
+		cancelFuncs:            make(map[string]context.CancelFunc),
+		pausedJobs:             make(map[string]bool),
 	}
 }
 
@@ -436,13 +444,19 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 
 	batchSize := job.Request.BatchSize
 	if batchSize <= 0 {
-		batchSize = 2500
+		batchSize = o.defaultBatchSize // from DEFAULT_BATCH_SIZE in .env
+	}
+	if batchSize <= 0 {
+		batchSize = 5000 // built-in default
 	}
 
-	// Concurrency workers
+	// Concurrency workers: parallel collections streamed simultaneously
 	numWorkers := job.Request.ParallelCollections
 	if numWorkers <= 0 {
-		numWorkers = 4 // 4 parallel collection workers
+		numWorkers = o.defaultParallelWorkers // from DEFAULT_PARALLEL_WORKERS in .env
+	}
+	if numWorkers <= 0 {
+		numWorkers = 6 // built-in default
 	}
 
 	job.AddLog("INFO", fmt.Sprintf("🚀 High-Speed Engine active: %d parallel collection workers, batch size: %d", numWorkers, batchSize))

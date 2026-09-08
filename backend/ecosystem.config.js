@@ -50,9 +50,24 @@ module.exports = {
         PORT: '8080',
         GOGC: '50',
         GOMEMLIMIT: '3GiB',
+
+        // --- Clone Performance Tuning (mirrors .env settings) ---
+        // Change these values to tune clone speed without rebuilding.
+        // After editing: pm2 reload mongoclone
+        DEFAULT_BATCH_SIZE: '5000',      // docs per InsertMany batch (range: 1000–20000)
+        DEFAULT_PARALLEL_WORKERS: '6',   // parallel collection workers (range: 1–16)
+
+        // --- Optional CPU throttling (uncomment if this server runs other workloads) ---
+        // GOMAXPROCS: '2',    // Limit Go to 2 OS threads instead of all 4 cores
         // DATA_DIR: 'data',
         // PROFILES_DB_URI: 'mongodb://...',
       },
+
+      // Lower OS scheduling priority so other processes aren't starved during clones.
+      // 0 = normal priority, 10 = polite background task (recommended for shared servers)
+      // Uncomment the line below if this server also runs production services:
+      // treekill: false,
+      // args: [],
 
       // --- Logging ---
       out_file: '/root/.pm2/logs/mongoclone-out.log',

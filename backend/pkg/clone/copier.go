@@ -47,10 +47,10 @@ type BatchCopier struct {
 // NewBatchCopier creates a new BatchCopier.
 func NewBatchCopier(sourceClient, targetClient *mongo.Client, opts CopierOptions) *BatchCopier {
 	if opts.BatchSize <= 0 {
-		opts.BatchSize = 2500
+		opts.BatchSize = 5000 // 5000 docs/batch: fewer InsertMany round trips vs 2500 default
 	}
 	if opts.NumWorkers <= 0 {
-		opts.NumWorkers = 4 // Default 4 parallel ingestion workers
+		opts.NumWorkers = 6 // 6 parallel ingestion workers: better I/O saturation on 4+ core servers
 	}
 	return &BatchCopier{
 		sourceClient: sourceClient,
@@ -200,9 +200,9 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		}()
 	}
 
-	// Dedicated Progress Telemetry Broadcaster (Runs every 400ms)
+	// Dedicated Progress Telemetry Broadcaster (Runs every 800ms — reduced from 400ms to lower GC pressure)
 	go func() {
-		ticker := time.NewTicker(400 * time.Millisecond)
+		ticker := time.NewTicker(800 * time.Millisecond)
 		defer ticker.Stop()
 		lastDocs := int64(0)
 		lastBytes := int64(0)
@@ -323,25 +323,41 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		for cursor.Next(ctx) {
 			retryCount = 0 // Reset retry count upon successfully receiving documents
 
-			var doc bson.M
-			if err := cursor.Decode(&doc); err != nil {
-				streamErr = fmt.Errorf("failed to decode document: %w", err)
-				break
-			}
-
-			rawBytes, _ := bson.Marshal(doc)
-			currentBatchBytes += int64(len(rawBytes))
+			var docEntry any
+			var docBytes int64
 
 			if hasMasking {
-				doc = c.opts.Masker.MaskDocument(sourceDB, sourceColl, doc)
+				// Masked path: must decode to bson.M so masking rules can modify fields
+				var doc bson.M
+				if err := cursor.Decode(&doc); err != nil {
+					streamErr = fmt.Errorf("failed to decode document: %w", err)
+					break
+				}
+				rawBytes, _ := bson.Marshal(doc)
+				docBytes = int64(len(rawBytes))
+				docEntry = c.opts.Masker.MaskDocument(sourceDB, sourceColl, doc)
+			} else {
+				// ⚡ Raw BSON fast path: zero decode/encode overhead.
+				// cursor.Current is the raw BSON bytes from the wire — pass directly to InsertMany.
+				// This eliminates the most expensive per-document CPU operation.
+				raw := make(bson.Raw, len(cursor.Current))
+				copy(raw, cursor.Current)
+				docBytes = int64(len(raw))
+				docEntry = raw
 			}
 
-			currentBatch = append(currentBatch, doc)
+			currentBatchBytes += docBytes
+			currentBatch = append(currentBatch, docEntry)
 
 			if len(currentBatch) >= c.opts.BatchSize {
 				var lastID any
-				if lastDoc, ok := currentBatch[len(currentBatch)-1].(bson.M); ok {
-					lastID = lastDoc["_id"]
+				switch v := currentBatch[len(currentBatch)-1].(type) {
+				case bson.M:
+					lastID = v["_id"]
+				case bson.Raw:
+					if id, err := v.LookupErr("_id"); err == nil {
+						lastID = id
+					}
 				}
 				if lastID != nil {
 					lastSentID = lastID
@@ -415,11 +431,16 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		break
 	}
 
-	// Push remaining documents
+	// Push remaining documents (tail flush)
 	if len(currentBatch) > 0 {
 		var lastID any
-		if lastDoc, ok := currentBatch[len(currentBatch)-1].(bson.M); ok {
-			lastID = lastDoc["_id"]
+		switch v := currentBatch[len(currentBatch)-1].(type) {
+		case bson.M:
+			lastID = v["_id"]
+		case bson.Raw:
+			if id, err := v.LookupErr("_id"); err == nil {
+				lastID = id
+			}
 		}
 		if !sendBatch(docBatch{
 			docs:      currentBatch,
