@@ -12,6 +12,8 @@ import {
   Sliders,
   Database,
   ExternalLink,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 interface Step1ConnectionsProps {
@@ -47,6 +49,10 @@ export const Step1Connections: React.FC<Step1ConnectionsProps> = ({
 
   const [showAdvancedSource, setShowAdvancedSource] = useState(false);
   const [showAdvancedTarget, setShowAdvancedTarget] = useState(false);
+
+  // URI masking: hide embedded passwords by default, toggle to reveal
+  const [showSourceUri, setShowSourceUri] = useState(false);
+  const [showTargetUri, setShowTargetUri] = useState(false);
 
   async function handleTestSource() {
     setSourceStatus({ tested: false, loading: true });
@@ -162,16 +168,27 @@ export const Step1Connections: React.FC<Step1ConnectionsProps> = ({
             <label className="text-xs font-semibold text-slate-300">
               MongoDB Connection URI
             </label>
-            <input
-              type="text"
-              placeholder="mongodb://user:password@host:27017/admin?replicaSet=rs0"
-              value={sourceConfig.uri || ''}
-              onChange={(e) => {
-                setSourceConfig({ ...sourceConfig, uri: e.target.value });
-                setSourceStatus({ tested: false, loading: false });
-              }}
-              className="w-full glass-input px-4 py-2.5 rounded-xl font-mono text-xs placeholder:text-slate-600"
-            />
+            <div className="relative">
+              <input
+                type={showSourceUri ? 'text' : 'password'}
+                placeholder="mongodb://user:password@host:27017/admin?replicaSet=rs0"
+                value={sourceConfig.uri || ''}
+                onChange={(e) => {
+                  setSourceConfig({ ...sourceConfig, uri: e.target.value });
+                  setSourceStatus({ tested: false, loading: false });
+                }}
+                className="w-full glass-input px-4 py-2.5 pr-10 rounded-xl font-mono text-xs placeholder:text-slate-600"
+              />
+              <button
+                type="button"
+                onClick={() => setShowSourceUri((v) => !v)}
+                tabIndex={-1}
+                title={showSourceUri ? 'Hide URI' : 'Show URI'}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                {showSourceUri ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
           </div>
 
           {/* Advanced options toggle */}
@@ -298,16 +315,27 @@ export const Step1Connections: React.FC<Step1ConnectionsProps> = ({
             <label className="text-xs font-semibold text-slate-300">
               MongoDB Connection URI
             </label>
-            <input
-              type="text"
-              placeholder="mongodb://user:password@staging-host:27017/admin"
-              value={targetConfig.uri || ''}
-              onChange={(e) => {
-                setTargetConfig({ ...targetConfig, uri: e.target.value });
-                setTargetStatus({ tested: false, loading: false });
-              }}
-              className="w-full glass-input px-4 py-2.5 rounded-xl font-mono text-xs placeholder:text-slate-600"
-            />
+            <div className="relative">
+              <input
+                type={showTargetUri ? 'text' : 'password'}
+                placeholder="mongodb://user:password@staging-host:27017/admin"
+                value={targetConfig.uri || ''}
+                onChange={(e) => {
+                  setTargetConfig({ ...targetConfig, uri: e.target.value });
+                  setTargetStatus({ tested: false, loading: false });
+                }}
+                className="w-full glass-input px-4 py-2.5 pr-10 rounded-xl font-mono text-xs placeholder:text-slate-600"
+              />
+              <button
+                type="button"
+                onClick={() => setShowTargetUri((v) => !v)}
+                tabIndex={-1}
+                title={showTargetUri ? 'Hide URI' : 'Show URI'}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                {showTargetUri ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
           </div>
 
           {/* Advanced options toggle */}

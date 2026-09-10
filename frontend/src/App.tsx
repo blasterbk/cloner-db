@@ -238,6 +238,7 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
         uiScale={uiScale}
         setUiScale={handleSetUiScale}
         onLogout={onLogout}
+        wsConnected={wsConnected}
       />
 
       {/* Main Scaled Container (Supports 60% / 80% / 100% density) */}
@@ -262,6 +263,8 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
               setActiveTab('dashboard');
             }}
             onBack={() => setActiveTab('dashboard')}
+            activeJobId={activeJob?.status === 'RUNNING' ? activeJob.id : undefined}
+            wsConnected={wsConnected}
           />
         )}
       </main>

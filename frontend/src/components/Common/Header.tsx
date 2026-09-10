@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Database, History, LogOut, Monitor, FlaskConical, Settings } from 'lucide-react';
+import { Database, History, LogOut, Monitor, FlaskConical, Settings, WifiOff } from 'lucide-react';
 import { SettingsModal } from './SettingsModal';
 
 interface HeaderProps {
@@ -9,6 +9,8 @@ interface HeaderProps {
   uiScale: number;
   setUiScale: (scale: number) => void;
   onLogout?: () => void;
+  /** True when the live WebSocket stream is connected. False = HTTP polling fallback is active. */
+  wsConnected: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -18,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
   uiScale,
   setUiScale,
   onLogout,
+  wsConnected,
 }) => {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -134,6 +137,17 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </button>
           </nav>
+
+          {/* WebSocket disconnected indicator — only shown when WS is down */}
+          {!wsConnected && (
+            <div
+              title="Live WebSocket stream offline — falling back to HTTP polling (updates may be slightly delayed)"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] font-semibold animate-pulse"
+            >
+              <WifiOff className="w-3 h-3" />
+              <span className="hidden sm:inline">WS Offline</span>
+            </div>
+          )}
 
           {/* Settings gear button */}
           <button

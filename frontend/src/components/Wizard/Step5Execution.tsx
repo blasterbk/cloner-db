@@ -17,6 +17,7 @@ import {
   Terminal,
   ArrowRight,
   Database,
+  X,
 } from 'lucide-react';
 
 interface Step5ExecutionProps {
@@ -32,6 +33,11 @@ export const Step5Execution: React.FC<Step5ExecutionProps> = ({
   const [autoScroll, setAutoScroll] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
   const confettiTriggered = useRef(false);
+
+  // Styled cancel confirmation modal state
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  // Error modal state (replaces alert())
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   useEffect(() => {
     if (autoScroll && logEndRef.current) {
@@ -52,15 +58,27 @@ export const Step5Execution: React.FC<Step5ExecutionProps> = ({
     }
   }, [activeJob?.status]);
 
-  async function handleCancel() {
-    if (!activeJob) return;
-    if (!confirm('Are you sure you want to stop this clone pipeline?')) return;
+  // Escape key closes cancel modal
+  useEffect(() => {
+    if (!showCancelModal && !cancelError) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setShowCancelModal(false);
+        setCancelError(null);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showCancelModal, cancelError]);
 
+  async function handleCancelConfirmed() {
+    if (!activeJob) return;
+    setShowCancelModal(false);
     setCancelling(true);
     try {
       await cancelJob(activeJob.id);
     } catch (e: any) {
-      alert(`Failed to cancel clone: ${e.message || e}`);
+      setCancelError(e.message || String(e));
     } finally {
       setCancelling(false);
     }
@@ -114,9 +132,9 @@ export const Step5Execution: React.FC<Step5ExecutionProps> = ({
         <div className="flex items-center gap-3">
           {!isFinished ? (
             <button
-              onClick={handleCancel}
+              onClick={() => setShowCancelModal(true)}
               disabled={cancelling}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <StopCircle className="w-4 h-4" />
               <span>{cancelling ? 'Stopping...' : 'Cancel Operation'}</span>
@@ -214,7 +232,7 @@ export const Step5Execution: React.FC<Step5ExecutionProps> = ({
           <div className="flex items-center gap-2">
             <Terminal className="w-4 h-4 text-brand-400" />
             <span className="text-xs font-semibold text-slate-200">
-              Live Execution Telemetry & Console Logs ({activeJob.logs.length})
+              Live Execution Telemetry &amp; Console Logs ({activeJob.logs.length})
             </span>
           </div>
 
@@ -231,7 +249,7 @@ export const Step5Execution: React.FC<Step5ExecutionProps> = ({
 
         <div className="p-4 bg-slate-950 font-mono text-xs max-h-64 overflow-y-auto space-y-1.5">
           {activeJob.logs.map((log, i) => {
-            const levelColors = {
+            const levelColors: Record<string, string> = {
               INFO: 'text-slate-400',
               WARN: 'text-amber-400',
               ERROR: 'text-rose-400 font-bold',
@@ -264,6 +282,82 @@ export const Step5Execution: React.FC<Step5ExecutionProps> = ({
           <div ref={logEndRef} />
         </div>
       </div>
+
+      {/* ─── Cancel Confirmation Modal ──────────────────────────────────────────── */}
+      {showCancelModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-150">
+          <div className="glass-panel w-full max-w-md rounded-3xl border border-rose-500/30 p-6 space-y-5 shadow-2xl bg-slate-900/95 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3.5">
+              <div className="p-3 rounded-2xl bg-rose-500/15 text-rose-400 border border-rose-500/30 shrink-0">
+                <StopCircle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Stop Clone Pipeline?</h3>
+                <p className="text-xs text-slate-400 mt-0.5">This cannot be undone mid-operation</p>
+              </div>
+              <button
+                onClick={() => setShowCancelModal(false)}
+                className="ml-auto p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-slate-950/60 border border-slate-800 space-y-1.5 text-xs text-slate-300">
+              <p className="font-semibold text-white font-mono">{activeJob.name}</p>
+              <p>
+                Stopping will cancel the active clone. Progress so far will be saved as a{' '}
+                <span className="text-amber-300 font-semibold">checkpoint</span> — you can resume
+                later from the Clone History tab.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-1">
+              <button
+                onClick={() => setShowCancelModal(false)}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors"
+              >
+                Keep Running
+              </button>
+              <button
+                onClick={handleCancelConfirmed}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-white transition-all shadow-lg shadow-rose-500/25 flex items-center gap-1.5"
+              >
+                <StopCircle className="w-3.5 h-3.5" />
+                <span>Stop Clone</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Cancel Error Modal (replaces alert()) ──────────────────────────────── */}
+      {cancelError && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-150">
+          <div className="glass-panel w-full max-w-md rounded-3xl border border-amber-500/30 p-6 space-y-5 shadow-2xl bg-slate-900/95 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3.5">
+              <div className="p-3 rounded-2xl bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Failed to Cancel Clone</h3>
+                <p className="text-xs text-slate-400 mt-0.5">Server returned an error</p>
+              </div>
+            </div>
+            <p className="text-xs font-mono text-rose-300 bg-slate-950/60 p-3.5 rounded-2xl border border-slate-800 break-all">
+              {cancelError}
+            </p>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setCancelError(null)}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-slate-700 hover:bg-slate-600 text-white transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

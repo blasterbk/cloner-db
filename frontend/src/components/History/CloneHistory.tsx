@@ -16,14 +16,23 @@ import {
   MinusSquare,
   Eraser,
   AlertTriangle,
+  Download,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
+
+const PAGE_SIZE = 10;
 
 interface CloneHistoryProps {
   onSelectJob: (job: CloneJob) => void;
   onBack?: () => void;
+  /** ID of the currently running job, if any. When set, auto-refreshes the list every 5s. */
+  activeJobId?: string;
+  /** Whether the WebSocket is connected. Used to decide polling interval. */
+  wsConnected?: boolean;
 }
 
-export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack }) => {
+export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack, activeJobId, wsConnected }) => {
   const [jobs, setJobs] = useState<CloneJob[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -43,9 +52,28 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
   // Clear all modal
   const [showClearAllModal, setShowClearAllModal] = useState(false);
 
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+
   useEffect(() => {
     loadJobs();
   }, []);
+
+  // Auto-refresh every 5s while a RUNNING job exists and this tab is visible.
+  // Falls back to 3s when WebSocket is also disconnected (double fallback for reliability).
+  useEffect(() => {
+    if (!activeJobId) return; // no running job — no need to poll
+    const interval = !wsConnected ? 3000 : 5000;
+    const id = setInterval(() => {
+      loadJobs();
+    }, interval);
+    return () => clearInterval(id);
+  }, [activeJobId, wsConnected]);
+
+  // Reset to page 1 whenever search or filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, filterStatus]);
 
   async function loadJobs() {
     setLoading(true);
@@ -114,6 +142,11 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
     });
   }
 
+  // Pagination derived values
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const paginated = filtered.slice((safeCurrentPage - 1) * PAGE_SIZE, safeCurrentPage * PAGE_SIZE);
+
   const allFilteredIds = filtered.map((j) => j.id);
   const allSelected = allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedIds.has(id));
   const someSelected = allFilteredIds.some((id) => selectedIds.has(id));
@@ -162,6 +195,35 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
   const selectedCount = Array.from(selectedIds).filter((id) =>
     filtered.some((j) => j.id === id)
   ).length;
+
+  // ─── Audit Log Export ─────────────────────────────────────────────────────
+  function downloadAuditLogs(job: CloneJob) {
+    const lines: string[] = [
+      `MongoClone — Audit Log Export`,
+      `Job: ${job.name}`,
+      `Status: ${job.status}`,
+      `Mode: ${job.mode}`,
+      `Source: ${job.source_masked}`,
+      `Target: ${job.target_masked}`,
+      `Duration: ${formatTime(job.duration_seconds)}`,
+      `Documents: ${(job.progress?.transferred_docs || 0).toLocaleString()}`,
+      `Volume: ${formatBytes(job.progress?.transferred_bytes)}`,
+      `Exported: ${new Date().toISOString()}`,
+      `─`.repeat(60),
+      '',
+      ...job.logs.map(
+        (l) =>
+          `[${new Date(l.timestamp).toISOString()}] [${l.level.padEnd(7)}] ${l.message}`
+      ),
+    ];
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `mongoclone-audit-${job.id.slice(0, 8)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto animate-in fade-in duration-200">
@@ -369,7 +431,7 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4">
-          {filtered.map((job) => {
+          {paginated.map((job) => {
             const isPITR = job.mode === 'POINT_IN_TIME_PITR';
             const isSelected = selectedIds.has(job.id);
 
@@ -491,6 +553,65 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
         </div>
       )}
 
+      {/* ─── Pagination Controls ──────────────────────────────────────────────── */}
+      {!loading && filtered.length > PAGE_SIZE && (
+        <div className="flex items-center justify-between px-1 text-xs">
+          <span className="text-slate-500 font-mono">
+            Showing {(safeCurrentPage - 1) * PAGE_SIZE + 1}–{Math.min(safeCurrentPage * PAGE_SIZE, filtered.length)} of {filtered.length} records
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={safeCurrentPage === 1}
+              className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+
+            {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+              // Windowed page numbers: always show first, last, and 2 around current
+              let page: number;
+              if (totalPages <= 7) {
+                page = i + 1;
+              } else if (safeCurrentPage <= 4) {
+                page = i + 1 <= 5 ? i + 1 : i === 5 ? -1 : totalPages;
+              } else if (safeCurrentPage >= totalPages - 3) {
+                page = i === 0 ? 1 : i === 1 ? -1 : totalPages - (6 - i);
+              } else {
+                const map = [1, -1, safeCurrentPage - 1, safeCurrentPage, safeCurrentPage + 1, -1, totalPages];
+                page = map[i];
+              }
+              if (page === -1) {
+                return (
+                  <span key={`ellipsis-${i}`} className="px-1.5 text-slate-600">…</span>
+                );
+              }
+              return (
+                <button
+                  key={page}
+                  onClick={() => setCurrentPage(page)}
+                  className={`w-7 h-7 rounded-lg text-xs font-semibold transition-all ${
+                    page === safeCurrentPage
+                      ? 'bg-brand-500 text-slate-950 shadow font-bold'
+                      : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+                  }`}
+                >
+                  {page}
+                </button>
+              );
+            })}
+
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={safeCurrentPage === totalPages}
+              className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ─── Audit Logs Modal ───────────────────────────────────────────────────── */}
       {selectedAuditJob && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
@@ -509,12 +630,22 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
                   </p>
                 </div>
               </div>
-              <button
-                onClick={() => setSelectedAuditJob(null)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => downloadAuditLogs(selectedAuditJob)}
+                  title="Download logs as .txt"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/60 transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download .txt</span>
+                </button>
+                <button
+                  onClick={() => setSelectedAuditJob(null)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto space-y-2 p-4 rounded-2xl bg-slate-950 border border-slate-800 font-mono text-xs">
