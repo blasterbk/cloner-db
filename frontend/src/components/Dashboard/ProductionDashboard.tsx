@@ -23,6 +23,7 @@ import {
   Trash2,
   Edit2,
   Pause,
+  StopCircle,
 } from 'lucide-react';
 
 interface ProductionDashboardProps {
@@ -71,25 +72,26 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   const [deletingDb, setDeletingDb] = useState(false);
 
   // Active job cancellation state
+  const [showCancelJobModal, setShowCancelJobModal] = useState(false);
   const [cancellingActiveJob, setCancellingActiveJob] = useState(false);
 
-  async function handleCancelActiveJob(e: React.MouseEvent) {
+  function handleCancelActiveJob(e: React.MouseEvent) {
     e.stopPropagation();
     if (!activeJob) return;
-    const isPaused = activeJob.status === 'PAUSED';
-    const confirmMsg = isPaused
-      ? `Are you sure you want to cancel and dismiss this paused migration (${activeJob.name})?`
-      : `Are you sure you want to stop and cancel this migration (${activeJob.name})?`;
-    if (!window.confirm(confirmMsg)) return;
+    setShowCancelJobModal(true);
+  }
 
+  async function confirmCancelActiveJob() {
+    if (!activeJob) return;
     const targetJobId = activeJob.id;
     setCancellingActiveJob(true);
     try {
       await cancelJob(targetJobId);
+      setActiveJob(null);
+      setShowCancelJobModal(false);
     } catch (e: any) {
       console.error('Failed to cancel job:', e);
     } finally {
-      setActiveJob(null);
       setCancellingActiveJob(false);
     }
   }
@@ -1145,6 +1147,91 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
                   <>
                     <Trash2 className="w-3.5 h-3.5 fill-slate-950" />
                     <span>Remove Database</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Professional Cancel Migration Modal for Dashboard Alert Banner */}
+      {showCancelJobModal && activeJob && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="glass-panel w-full max-w-md rounded-3xl border border-rose-500/40 p-6 space-y-5 shadow-2xl bg-slate-900/95 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-3.5">
+                <div className="p-3 rounded-2xl bg-rose-500/15 text-rose-400 border border-rose-500/30 shrink-0">
+                  <StopCircle className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white font-sans">
+                    Cancel & Dismiss Migration?
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5 font-sans">
+                    Halt and dismiss active database clone
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !cancellingActiveJob && setShowCancelJobModal(false)}
+                disabled={cancellingActiveJob}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-2 text-xs font-mono">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white text-xs truncate max-w-[240px]">
+                    {activeJob.name}
+                  </span>
+                  <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold uppercase border ${
+                    activeJob.status === 'PAUSED'
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 animate-pulse'
+                  }`}>
+                    {activeJob.status}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-850">
+                  <span>Progress: <span className="text-white font-bold">{(activeJob.progress?.percent || 0).toFixed(1)}%</span></span>
+                  <span>{(activeJob.progress?.transferred_docs || 0).toLocaleString()} docs</span>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/40 p-3 rounded-xl border border-slate-800/80 font-sans">
+                Are you sure you want to cancel and dismiss this migration? Active transfers will stop immediately and the status banner will be removed.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-800 font-sans">
+              <button
+                type="button"
+                onClick={() => setShowCancelJobModal(false)}
+                disabled={cancellingActiveJob}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors disabled:opacity-50"
+              >
+                Keep Migration
+              </button>
+              <button
+                type="button"
+                onClick={confirmCancelActiveJob}
+                disabled={cancellingActiveJob}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-white transition-all shadow-lg shadow-rose-500/25 flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {cancellingActiveJob ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Cancelling...</span>
+                  </>
+                ) : (
+                  <>
+                    <StopCircle className="w-3.5 h-3.5" />
+                    <span>Yes, Cancel & Dismiss</span>
                   </>
                 )}
               </button>

@@ -671,19 +671,27 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
     }
   }
 
-  async function handleCancel() {
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+
+  function handleCancel() {
     if (!activeJob) return;
-    if (!window.confirm('Are you sure you want to cancel this clone migration?')) {
-      return;
-    }
+    setCancelError(null);
+    setShowCancelModal(true);
+  }
+
+  async function handleConfirmCancel() {
+    if (!activeJob) return;
     const targetJobId = activeJob.id;
     setCancelling(true);
+    setCancelError(null);
     try {
       await cancelJob(targetJobId);
       setActiveJob(null);
+      setShowCancelModal(false);
       onBack();
     } catch (e: any) {
-      alert(`Failed to cancel clone: ${e.message || e}`);
+      setCancelError(e.message || 'Failed to cancel clone migration');
       setCancelling(false);
     }
   }
@@ -1962,6 +1970,97 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
                 className="px-5 py-2.5 rounded-xl text-xs font-bold bg-cyber-violet text-white hover:bg-violet-600 disabled:opacity-50 transition-all shadow-md shadow-violet-500/20"
               >
                 Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Professional Cancel Migration Confirmation Modal */}
+      {showCancelModal && activeJob && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="glass-panel w-full max-w-md rounded-3xl border border-rose-500/40 p-6 space-y-5 shadow-2xl bg-slate-900/95 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-3.5">
+                <div className="p-3 rounded-2xl bg-rose-500/15 text-rose-400 border border-rose-500/30 shrink-0">
+                  <StopCircle className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white font-sans">
+                    Cancel Clone Migration?
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5 font-sans">
+                    Halt live replication pipeline
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !cancelling && setShowCancelModal(false)}
+                disabled={cancelling}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-2 text-xs font-mono">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white text-xs truncate max-w-[240px]">
+                    {activeJob.name}
+                  </span>
+                  <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold uppercase border ${
+                    activeJob.status === 'PAUSED'
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 animate-pulse'
+                  }`}>
+                    {activeJob.status}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-850">
+                  <span>Progress: <span className="text-white font-bold">{(activeJob.progress?.percent || 0).toFixed(1)}%</span></span>
+                  <span>{(activeJob.progress?.transferred_docs || 0).toLocaleString()} docs</span>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/40 p-3 rounded-xl border border-slate-800/80 font-sans">
+                Are you sure you want to cancel this clone migration? Halting will stop all active worker threads. A checkpoint will remain available in <span className="text-brand-400 font-semibold">Clone History</span>.
+              </p>
+
+              {cancelError && (
+                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono">
+                  {cancelError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-800 font-sans">
+              <button
+                type="button"
+                onClick={() => setShowCancelModal(false)}
+                disabled={cancelling}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors disabled:opacity-50"
+              >
+                Keep Migration
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmCancel}
+                disabled={cancelling}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-white transition-all shadow-lg shadow-rose-500/25 flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {cancelling ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Cancelling...</span>
+                  </>
+                ) : (
+                  <>
+                    <StopCircle className="w-3.5 h-3.5" />
+                    <span>Yes, Cancel Migration</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
