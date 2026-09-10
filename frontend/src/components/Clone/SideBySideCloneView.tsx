@@ -7,7 +7,7 @@ import {
   OplogWindow,
   SavedProfile,
 } from '../../types';
-import { resumeJob, pauseJob, fetchOplogWindow, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, startCloneJob, cancelJob, fetchCatalog, listJobs } from '../../api/client';
+import { resumeJob, pauseJob, fetchOplogWindow, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, startCloneJob, cancelJob, fetchCatalog, listJobs, getJob } from '../../api/client';
 import { MetricCard } from '../Common/MetricCard';
 import { StatusBadge } from '../Common/StatusBadge';
 import confetti from 'canvas-confetti';
@@ -93,12 +93,93 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+/**
+ * Robust matcher to determine whether an active or historical CloneJob
+ * is associated with a given ProdDatabaseItem. Matches across custom display
+ * names, physical cluster database names, job title, and connection URIs.
+ */
+export function isJobMatchingDb(
+  job: CloneJob | null | undefined,
+  db: ProdDatabaseItem | null | undefined
+): boolean {
+  if (!job || !db) return false;
+
+  const dbNameLower = (db.name || '').trim().toLowerCase();
+  const actualDbNameLower = (db.actualDbName || '').trim().toLowerCase();
+
+  // 1. Match against databases array in the job request
+  const hasRequestDbMatch = job.request?.databases?.some((d) => {
+    const srcLower = (d.source_database || '').trim().toLowerCase();
+    if (!srcLower) return false;
+    if (srcLower === dbNameLower) return true;
+    if (actualDbNameLower && srcLower === actualDbNameLower) return true;
+    // Prefix / substring matching (e.g. 'stage-ag-google' vs 'ag-google')
+    if (dbNameLower && (srcLower.includes(dbNameLower) || dbNameLower.includes(srcLower))) return true;
+    if (actualDbNameLower && (srcLower.includes(actualDbNameLower) || actualDbNameLower.includes(srcLower))) return true;
+    return false;
+  });
+  if (hasRequestDbMatch) return true;
+
+  // 2. Match against job name (e.g. 'Clone ag-google -> birats_db' or 'Clone stage-ag-google -> birats_db')
+  const jobNameLower = (job.name || '').toLowerCase();
+  if (dbNameLower && jobNameLower.includes(dbNameLower)) return true;
+  if (actualDbNameLower && jobNameLower.includes(actualDbNameLower)) return true;
+
+  // 3. Match against source database extracted from URI
+  const extractDbNameFromUri = (uri: string): string => {
+    try {
+      const clean = uri.split('?')[0].replace(/\/+$/, '');
+      const lastSlash = clean.lastIndexOf('/');
+      if (lastSlash !== -1) {
+        const sub = clean.substring(lastSlash + 1);
+        if (sub && !sub.includes('@') && !sub.includes(':')) {
+          return sub.toLowerCase();
+        }
+      }
+    } catch {}
+    return '';
+  };
+
+  const uriToCheck = job.source_masked || job.request?.source?.uri || '';
+  const uriDb = extractDbNameFromUri(uriToCheck);
+  if (uriDb) {
+    if (uriDb === dbNameLower) return true;
+    if (actualDbNameLower && uriDb === actualDbNameLower) return true;
+    if (dbNameLower && (uriDb.includes(dbNameLower) || dbNameLower.includes(uriDb))) return true;
+    if (actualDbNameLower && (uriDb.includes(actualDbNameLower) || actualDbNameLower.includes(uriDb))) return true;
+  }
+
+  // 4. Host/Port match between clusterUri and job source
+  if (db.clusterUri && uriToCheck) {
+    try {
+      const getHostPort = (u: string) => {
+        const at = u.indexOf('@');
+        const rest = at !== -1 ? u.substring(at + 1) : u.replace(/^mongodb:\/\//, '');
+        return rest.split('/')[0].split('?')[0].toLowerCase();
+      };
+      const dbHost = getHostPort(db.clusterUri);
+      const jobHost = getHostPort(uriToCheck);
+      if (dbHost && jobHost && (dbHost === jobHost || dbHost.includes(jobHost) || jobHost.includes(dbHost))) {
+        return true;
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
 export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
   db,
   onBack,
   activeJob,
   setActiveJob,
 }) => {
+  // Determine if activeJob belongs to this DB
+  const isJobForThisDb = Boolean(isJobMatchingDb(activeJob, db));
+  const isRunning = isJobForThisDb && activeJob?.status === 'RUNNING';
+  const isPaused = isJobForThisDb && activeJob?.status === 'PAUSED';
+  const isInterrupted = isJobForThisDb && (activeJob?.status === 'CANCELLED' || activeJob?.status === 'FAILED');
+
   // Source selection state
   const [collectionSearch, setCollectionSearch] = useState('');
   const [collectionsList, setCollectionsList] = useState(db.collections);
@@ -154,12 +235,7 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
   // Check if there is an active/paused job for this specific database on mount
   useEffect(() => {
     async function checkExistingJobForDb() {
-      if (
-        activeJob &&
-        activeJob.request?.databases?.some(
-          (d) => d.source_database.toLowerCase() === db.name.toLowerCase()
-        )
-      ) {
+      if (activeJob && isJobMatchingDb(activeJob, db)) {
         return;
       }
       try {
@@ -167,9 +243,7 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
         const found = jobs.find(
           (j) =>
             (j.status === 'RUNNING' || j.status === 'PAUSED') &&
-            j.request?.databases?.some(
-              (d) => d.source_database.toLowerCase() === db.name.toLowerCase()
-            )
+            isJobMatchingDb(j, db)
         );
         if (found) {
           setActiveJob(found);
@@ -177,7 +251,37 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
       } catch (e) {}
     }
     checkExistingJobForDb();
-  }, [db.name]);
+  }, [db.name, db.actualDbName]);
+
+  // Auto-sync target database name and URI if an active/paused job exists for this database
+  useEffect(() => {
+    if (activeJob && isJobForThisDb) {
+      const targetDb = activeJob.request?.databases?.[0]?.target_database;
+      if (targetDb) {
+        setTargetDbName(targetDb);
+      }
+      const jobTargetUri = activeJob.request?.target?.uri;
+      if (jobTargetUri && !targetUri) {
+        setTargetUri(jobTargetUri);
+      }
+    }
+  }, [activeJob?.id, isJobForThisDb]);
+
+  // Live polling for telemetry while on this view if migration is active/paused
+  useEffect(() => {
+    if (!activeJob?.id || !isJobForThisDb || (activeJob.status !== 'RUNNING' && activeJob.status !== 'PAUSED')) {
+      return;
+    }
+    const interval = setInterval(async () => {
+      try {
+        const fresh = await getJob(activeJob.id);
+        if (fresh) {
+          setActiveJob(fresh);
+        }
+      } catch (_) {}
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [activeJob?.id, isJobForThisDb, activeJob?.status]);
 
   useEffect(() => {
     loadTargetProfiles();
@@ -592,17 +696,6 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  const isJobForThisDb = Boolean(
-    activeJob &&
-    activeJob.request?.databases?.some(
-      (d) => d.source_database.toLowerCase() === db.name.toLowerCase()
-    )
-  );
-
-  const isRunning = isJobForThisDb && activeJob?.status === 'RUNNING';
-  const isPaused = isJobForThisDb && activeJob?.status === 'PAUSED';
-  const isInterrupted = isJobForThisDb && (activeJob?.status === 'CANCELLED' || activeJob?.status === 'FAILED');
-
   return (
     <div className="space-y-3.5 max-w-7xl mx-auto animate-in fade-in duration-200">
       {/* Top Compact Breadcrumb & Navigation Bar */}
@@ -630,6 +723,18 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
             <span className="px-1.5 py-0.5 text-[9px] font-bold rounded uppercase bg-cyber-violet/15 text-cyber-violet border border-cyber-violet/30">
               TEST
             </span>
+            {isPaused && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                PAUSED ({(activeJob?.progress?.percent || 0).toFixed(1)}%)
+              </span>
+            )}
+            {isRunning && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                RUNNING ({(activeJob?.progress?.percent || 0).toFixed(1)}%)
+              </span>
+            )}
           </div>
         </div>
 
@@ -929,9 +1034,31 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
                         </div>
                         <span className="truncate font-medium text-[11px]">{c.name}</span>
                       </div>
-                      <span className="text-[10px] text-slate-400 shrink-0">
-                        {c.docCount.toLocaleString()} docs
-                      </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isJobForThisDb && (() => {
+                          const collTelemetry = activeJob?.progress?.collections?.[`${(activeJob.request?.databases?.[0]?.source_database || db.name)}.${c.name}`]
+                            || activeJob?.progress?.collections?.[`${db.name}.${c.name}`]
+                            || (activeJob?.progress?.collections && Object.values(activeJob.progress.collections).find((x: any) => x.collection === c.name));
+                          if (collTelemetry?.completed) {
+                            return (
+                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-sans font-semibold">
+                                ✓ Done
+                              </span>
+                            );
+                          }
+                          if (collTelemetry && collTelemetry.percent > 0) {
+                            return (
+                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-sans font-semibold animate-pulse">
+                                {collTelemetry.percent.toFixed(0)}%
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
+                        <span className="text-[10px] text-slate-400">
+                          {c.docCount.toLocaleString()} docs
+                        </span>
+                      </div>
                     </div>
                   );
                 })}
@@ -1420,9 +1547,35 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
                                 </button>
                               )}
 
-                              <span className="px-1.5 py-0.2 rounded text-[9px] bg-cyber-violet/15 text-cyber-violet border border-cyber-violet/30 font-sans font-semibold">
-                                Replicating
-                              </span>
+                              {isJobForThisDb && (() => {
+                                const collTelemetry = activeJob?.progress?.collections?.[`${(activeJob.request?.databases?.[0]?.source_database || db.name)}.${c.name}`]
+                                  || activeJob?.progress?.collections?.[`${db.name}.${c.name}`]
+                                  || (activeJob?.progress?.collections && Object.values(activeJob.progress.collections).find((x: any) => x.collection === c.name));
+                                if (collTelemetry?.completed) {
+                                  return (
+                                    <span className="px-1.5 py-0.2 rounded text-[9px] bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-sans font-semibold">
+                                      ✓ Complete
+                                    </span>
+                                  );
+                                }
+                                if (collTelemetry && collTelemetry.percent > 0) {
+                                  return (
+                                    <span className="px-1.5 py-0.2 rounded text-[9px] bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-sans font-semibold animate-pulse">
+                                      {collTelemetry.percent.toFixed(0)}%
+                                    </span>
+                                  );
+                                }
+                                return (
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] bg-cyber-violet/15 text-cyber-violet border border-cyber-violet/30 font-sans font-semibold">
+                                    Replicating
+                                  </span>
+                                );
+                              })()}
+                              {!isJobForThisDb && (
+                                <span className="px-1.5 py-0.2 rounded text-[9px] bg-cyber-violet/15 text-cyber-violet border border-cyber-violet/30 font-sans font-semibold">
+                                  Replicating
+                                </span>
+                              )}
                               <span className="text-[10px] text-slate-400">
                                 {c.docCount.toLocaleString()}
                               </span>
@@ -1467,16 +1620,52 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
       {/* Enterprise-Grade Sticky Action Dock */}
       <div className="sticky bottom-4 z-30 glass-panel-glow p-3 px-5 rounded-2xl border border-brand-500/30 bg-slate-900/95 shadow-2xl backdrop-blur-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-xl bg-brand-500/15 text-brand-400 border border-brand-500/30 flex items-center justify-center shrink-0">
-            <Zap className="w-4 h-4 fill-brand-400" />
+          <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 border ${
+            isPaused
+              ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+              : isRunning
+              ? 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30 animate-pulse'
+              : 'bg-brand-500/15 text-brand-400 border-brand-500/30'
+          }`}>
+            {isPaused ? <Pause className="w-4 h-4 text-amber-400" /> : <Zap className="w-4 h-4 fill-current" />}
           </div>
           <div className="space-y-0.5">
             <div className="text-xs font-bold text-white flex items-center gap-2">
-              <span>Ready to Clone</span>
-              <span className="text-slate-600">&bull;</span>
-              <span className="text-brand-400 font-mono">{selectedCollections.length} Collections</span>
-              <span className="text-slate-600">&bull;</span>
-              <span className="text-slate-300 font-mono text-[11px]">{formatBytes(db.sizeBytes)}</span>
+              {isPaused ? (
+                <>
+                  <span className="text-amber-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    Migration Paused
+                  </span>
+                  <span className="text-slate-600">&bull;</span>
+                  <span className="text-amber-400 font-mono font-bold">{(activeJob?.progress?.percent || 0).toFixed(1)}%</span>
+                  <span className="text-slate-600">&bull;</span>
+                  <span className="text-slate-300 font-mono text-[11px]">
+                    {(activeJob?.progress?.transferred_docs || 0).toLocaleString()} / {(activeJob?.progress?.total_estimated_docs || 0).toLocaleString()} docs
+                  </span>
+                </>
+              ) : isRunning ? (
+                <>
+                  <span className="text-cyan-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                    Cloning in Progress
+                  </span>
+                  <span className="text-slate-600">&bull;</span>
+                  <span className="text-cyan-400 font-mono font-bold">{(activeJob?.progress?.percent || 0).toFixed(1)}%</span>
+                  <span className="text-slate-600">&bull;</span>
+                  <span className="text-slate-300 font-mono text-[11px]">
+                    {(activeJob?.progress?.transferred_docs || 0).toLocaleString()} / {(activeJob?.progress?.total_estimated_docs || 0).toLocaleString()} docs
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>Ready to Clone</span>
+                  <span className="text-slate-600">&bull;</span>
+                  <span className="text-brand-400 font-mono">{selectedCollections.length} Collections</span>
+                  <span className="text-slate-600">&bull;</span>
+                  <span className="text-slate-300 font-mono text-[11px]">{formatBytes(db.sizeBytes)}</span>
+                </>
+              )}
             </div>
             <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5">
               <span className="text-emerald-400 font-bold">{db.name}</span>

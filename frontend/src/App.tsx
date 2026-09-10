@@ -59,15 +59,15 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
     setResetDashboardKey((prev) => prev + 1);
   }
 
-  // Restore the active RUNNING job on page load by querying the server directly
+  // Restore active RUNNING or PAUSED job on page load by querying the server directly
   useEffect(() => {
     async function restoreActiveJob() {
       try {
         const jobs = await listJobs();
         if (jobs && jobs.length > 0) {
-          const runningJob = jobs.find((j) => j.status === 'RUNNING');
-          if (runningJob) {
-            setActiveJob(runningJob);
+          const activeOrPaused = jobs.find((j) => j.status === 'RUNNING') || jobs.find((j) => j.status === 'PAUSED');
+          if (activeOrPaused) {
+            setActiveJob(activeOrPaused);
           }
         }
       } catch (_) {
@@ -92,9 +92,9 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
               return prev;
             }
 
-            // If no active job is tracked, only accept actively RUNNING jobs
+            // If no active job is tracked, accept RUNNING or PAUSED jobs
             if (!prev) {
-              if (p.status === 'RUNNING') {
+              if (p.status === 'RUNNING' || p.status === 'PAUSED') {
                 return p;
               }
               return null;
@@ -128,7 +128,7 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
 
   // Smart HTTP Polling Fallback — activates only when WebSocket has been disconnected for >3s.
   useEffect(() => {
-    if (!activeJob || (activeJob.status !== 'PENDING' && activeJob.status !== 'RUNNING')) {
+    if (!activeJob || (activeJob.status !== 'PENDING' && activeJob.status !== 'RUNNING' && activeJob.status !== 'PAUSED')) {
       return;
     }
     const interval = setInterval(async () => {

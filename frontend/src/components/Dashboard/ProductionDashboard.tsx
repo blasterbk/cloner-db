@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { fetchConnectionsOverview, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, fetchCatalog, cancelJob } from '../../api/client';
-import { ProdDatabaseItem, SideBySideCloneView } from '../Clone/SideBySideCloneView';
+import { ProdDatabaseItem, SideBySideCloneView, isJobMatchingDb } from '../Clone/SideBySideCloneView';
 import { CloneJob } from '../../types';
 import {
   Database,
@@ -22,6 +22,7 @@ import {
   AlertTriangle,
   Trash2,
   Edit2,
+  Pause,
 } from 'lucide-react';
 
 interface ProductionDashboardProps {
@@ -612,19 +613,18 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
 
             <button
               onClick={() => {
-                const srcDbName = activeJob.request?.databases?.[0]?.source_database;
-                const match = prodDatabases.find(
-                  (d) => d.name.toLowerCase() === srcDbName?.toLowerCase()
-                );
+                const match = prodDatabases.find((d) => isJobMatchingDb(activeJob, d));
                 if (match) {
                   handleSelectDbForClone(match);
-                } else if (prodDatabases.length > 0) {
+                } else {
+                  const srcDbName = activeJob.request?.databases?.[0]?.source_database || activeJob.name || 'Database';
                   handleSelectDbForClone({
                     id: `active-${srcDbName}`,
                     profileId: 'auto',
-                    name: srcDbName || 'Database',
+                    name: srcDbName,
+                    actualDbName: srcDbName,
                     clusterName: 'Source Cluster',
-                    clusterUri: activeJob.request.source.uri || '',
+                    clusterUri: activeJob.request?.source?.uri || activeJob.source_masked || '',
                     sizeBytes: activeJob.progress?.total_estimated_bytes || 0,
                     totalCollections: activeJob.progress?.total_collections || 0,
                     totalDocuments: activeJob.progress?.total_estimated_docs || 0,
@@ -688,14 +688,7 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
           {filtered.map((item) => {
-            const isJobForDb = Boolean(
-              activeJob &&
-              activeJob.request?.databases?.some(
-                (d) =>
-                  d.source_database.toLowerCase() === item.name.toLowerCase() ||
-                  (item.actualDbName && d.source_database.toLowerCase() === item.actualDbName.toLowerCase())
-              )
-            );
+            const isJobForDb = Boolean(isJobMatchingDb(activeJob, item));
             const isPausedForDb = isJobForDb && activeJob?.status === 'PAUSED';
             const isRunningForDb = isJobForDb && activeJob?.status === 'RUNNING';
 
@@ -801,10 +794,30 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
               <div className="pt-2 border-t border-slate-800/60">
                 <button
                   type="button"
-                  className="w-full py-1.5 px-3 rounded-lg text-[11px] font-bold bg-brand-500 text-slate-950 group-hover:bg-brand-400 shadow-sm shadow-brand-500/20 transition-all flex items-center justify-center gap-1.5"
+                  className={`w-full py-1.5 px-3 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm ${
+                    isPausedForDb
+                      ? 'bg-amber-500 text-slate-950 hover:bg-amber-400 shadow-amber-500/20'
+                      : isRunningForDb
+                      ? 'bg-cyan-500 text-slate-950 hover:bg-cyan-400 shadow-cyan-500/20'
+                      : 'bg-brand-500 text-slate-950 group-hover:bg-brand-400 shadow-brand-500/20'
+                  }`}
                 >
-                  <Zap className="w-3 h-3 fill-slate-950" />
-                  <span>Clone Database &rarr;</span>
+                  {isPausedForDb ? (
+                    <>
+                      <Pause className="w-3 h-3 fill-slate-950 text-slate-950" />
+                      <span>View Migration (Paused {(activeJob?.progress?.percent || 0).toFixed(0)}%) &rarr;</span>
+                    </>
+                  ) : isRunningForDb ? (
+                    <>
+                      <Zap className="w-3 h-3 fill-slate-950 text-slate-950 animate-pulse" />
+                      <span>View Migration ({(activeJob?.progress?.percent || 0).toFixed(0)}%) &rarr;</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-3 h-3 fill-slate-950" />
+                      <span>Clone Database &rarr;</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
