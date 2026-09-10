@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CloneJob } from './types';
 import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, logoutUser } from './api/client';
+import { seedDefaultProfileIfNeeded } from './utils/profileStorage';
 import { Header } from './components/Common/Header';
 import { LoginPage } from './components/Common/LoginPage';
 import { ProductionDashboard } from './components/Dashboard/ProductionDashboard';
@@ -70,6 +71,12 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
       localStorage.setItem('mongoclone_uiscale', scale.toString());
     } catch (e) {}
   }
+
+  // Seed default target profile from localStorage settings on first boot.
+  // This replaces the old .env DEFAULT_TARGET_URI seeding that happened on the server.
+  useEffect(() => {
+    seedDefaultProfileIfNeeded();
+  }, []);
 
   // Restore active or paused job on initial page load/refresh
   useEffect(() => {

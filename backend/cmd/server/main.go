@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -71,38 +70,9 @@ func main() {
 		dataDir = "data"
 	}
 
-	mongoURI := os.Getenv("PROFILES_DB_URI")
-	if mongoURI == "" {
-		mongoURI = os.Getenv("MONGODB_URI")
-	}
-	if mongoURI == "" {
-		mongoURI = os.Getenv("DEFAULT_TARGET_URI")
-	}
-
-	store := jobs.NewStore(dataDir, mongoURI)
+	store := jobs.NewStore(dataDir)
 	hub := ws.NewHub()
 	go hub.Run()
-
-	// Seed default target profile from .env if set and not already saved
-	defaultTargetURI := os.Getenv("DEFAULT_TARGET_URI")
-	defaultTargetName := os.Getenv("DEFAULT_TARGET_NAME")
-	if defaultTargetURI != "" {
-		if defaultTargetName == "" {
-			defaultTargetName = "Default Test Cluster"
-		}
-		existing := store.ListProfiles()
-		found := false
-		for _, p := range existing {
-			if p.Type == "target" && p.Name == defaultTargetName {
-				found = true
-				break
-			}
-		}
-		if !found {
-			store.SaveProfile(defaultTargetName, "target", mongopkg.EndpointConfig{URI: defaultTargetURI})
-			log.Printf("[env] Seeded default target profile: %s", defaultTargetName)
-		}
-	}
 
 	// Read performance tuning defaults from .env
 	defaultBatchSize := 0
@@ -145,17 +115,15 @@ func main() {
 		}
 	}
 
-	// 1. Health check with store diagnostics
+	// 1. Health check
 	mux.HandleFunc("/health", cors(func(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]any{
-			"status":          "ok",
-			"version":         "1.0.0",
-			"time":            time.Now().UTC().Format(time.RFC3339),
-			"uptime_seconds":  int64(time.Since(startTime).Seconds()),
+			"status":         "ok",
+			"version":        "1.0.0",
+			"time":           time.Now().UTC().Format(time.RFC3339),
+			"uptime_seconds": int64(time.Since(startTime).Seconds()),
 			"store": map[string]any{
-				"mongodb":  store.IsMongoConnected(),
-				"profiles": len(store.ListProfiles()),
-				"jobs":     len(store.ListJobs()),
+				"jobs": len(store.ListJobs()),
 			},
 		})
 	}))
@@ -469,65 +437,7 @@ func main() {
 		}
 	})))
 
-	// 6. Profiles CRUD
-	mux.HandleFunc("/api/v1/profiles", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "GET":
-			list := store.ListProfiles()
-			jsonResponse(w, http.StatusOK, list)
-
-		case "POST":
-			var req struct {
-				Name   string                  `json:"name"`
-				Type   string                  `json:"type"`
-				Config mongopkg.EndpointConfig `json:"config"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
-				return
-			}
-			profile := store.SaveProfile(req.Name, req.Type, req.Config)
-			jsonResponse(w, http.StatusCreated, profile)
-
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})))
-
-	mux.HandleFunc("/api/v1/profiles/", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
-		rawID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/profiles/"), "/")
-		id := rawID
-		if unescaped, err := url.PathUnescape(rawID); err == nil {
-			id = unescaped
-		}
-		id = strings.TrimSpace(id)
-		switch r.Method {
-		case "PUT", "POST":
-			var req struct {
-				Name   string                  `json:"name"`
-				Config mongopkg.EndpointConfig `json:"config"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
-				return
-			}
-			updated, ok := store.UpdateProfile(id, req.Name, req.Config)
-			if !ok {
-				jsonResponse(w, http.StatusNotFound, map[string]string{"error": "Profile not found"})
-				return
-			}
-			jsonResponse(w, http.StatusOK, updated)
-			return
-
-		case "DELETE":
-			deleted := store.DeleteProfile(id)
-			jsonResponse(w, http.StatusOK, map[string]bool{"deleted": deleted})
-			return
-
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})))
+	// 6. Profiles — managed client-side in browser localStorage (no server endpoints needed)
 
 	// 7. WebSocket live progress endpoint
 	// Auth via ?token= query parameter (browsers can't set headers on WebSocket connections)

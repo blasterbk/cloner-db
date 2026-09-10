@@ -11,7 +11,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/mongoclone/engine/pkg/jobs"
@@ -44,14 +43,10 @@ func NewOrchestrator(store *jobs.Store, hub *ws.Hub, dataDir string, defaultBatc
 	if dataDir == "" {
 		dataDir = "data"
 	}
-	var checkColl *mongo.Collection
-	if db := store.GetDB(); db != nil {
-		checkColl = db.Collection("mongoclone_checkpoints")
-	}
 	return &Orchestrator{
 		store:                  store,
 		hub:                    hub,
-		checkpointMgr:          NewCheckpointManager(dataDir, checkColl),
+		checkpointMgr:          NewCheckpointManager(dataDir, nil),
 		defaultBatchSize:       defaultBatchSize,
 		defaultParallelWorkers: defaultParallelWorkers,
 		cancelFuncs:            make(map[string]context.CancelFunc),

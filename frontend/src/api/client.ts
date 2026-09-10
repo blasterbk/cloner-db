@@ -7,6 +7,13 @@ import {
   SavedProfile,
   ServerInfo,
 } from '../types';
+import {
+  listProfilesFromStorage,
+  saveProfileToStorage,
+  updateProfileInStorage,
+  deleteProfileFromStorage,
+} from '../utils/profileStorage';
+
 
 const API_BASE = '/api/v1';
 
@@ -155,10 +162,12 @@ export async function deleteJob(id: string): Promise<boolean> {
   return data.deleted;
 }
 
+// ─── Profiles (localStorage) ─────────────────────────────────────────────────
+// All profile data is stored in the browser's localStorage.
+// No backend endpoints are involved — the backend is stateless for profiles.
+
 export async function listProfiles(): Promise<SavedProfile[]> {
-  const res = await fetch(`${API_BASE}/profiles`, { headers: authHeaders() });
-  if (!res.ok) return [];
-  return res.json();
+  return listProfilesFromStorage();
 }
 
 export async function saveProfile(
@@ -166,31 +175,22 @@ export async function saveProfile(
   type: 'source' | 'target',
   config: EndpointConfig
 ): Promise<SavedProfile> {
-  const res = await fetch(`${API_BASE}/profiles`, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify({ name, type, config }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Failed to save profile (${res.status})`);
-  }
-  return res.json();
+  return saveProfileToStorage(name, type, config);
 }
 
 export async function updateProfile(
   id: string,
   name: string,
   config: EndpointConfig,
-  type: 'source' | 'target' = 'target'
+  _type: 'source' | 'target' = 'target'
 ): Promise<SavedProfile> {
-  const res = await fetch(`${API_BASE}/profiles/${id}`, {
-    method: 'PUT',
-    headers: authHeaders(),
-    body: JSON.stringify({ name, config }),
-  });
-  if (!res.ok) throw new Error('Failed to update profile');
-  return res.json();
+  const updated = updateProfileInStorage(id, name, config);
+  if (!updated) throw new Error('Profile not found');
+  return updated;
+}
+
+export async function deleteProfile(id: string): Promise<boolean> {
+  return deleteProfileFromStorage(id);
 }
 
 export async function resumeJob(id: string): Promise<{ resumed: boolean }> {
@@ -203,15 +203,6 @@ export async function resumeJob(id: string): Promise<{ resumed: boolean }> {
     throw new Error(err.error || 'Failed to resume job');
   }
   return res.json();
-}
-
-export async function deleteProfile(id: string): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/profiles/${id}`, {
-    method: 'DELETE',
-    headers: authHeaders(),
-  });
-  const data = await res.json();
-  return data.deleted;
 }
 
 // WebSocket Stream Client
