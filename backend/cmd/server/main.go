@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -437,7 +438,65 @@ func main() {
 		}
 	})))
 
-	// 6. Profiles — managed client-side in browser localStorage (no server endpoints needed)
+	// 6. Profiles CRUD — stored in data/profiles.json (no MongoDB required)
+	mux.HandleFunc("/api/v1/profiles", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			list := store.ListProfiles()
+			jsonResponse(w, http.StatusOK, list)
+
+		case "POST":
+			var req struct {
+				Name   string                  `json:"name"`
+				Type   string                  `json:"type"`
+				Config mongopkg.EndpointConfig `json:"config"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+				return
+			}
+			if strings.TrimSpace(req.Name) == "" {
+				jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Profile name is required"})
+				return
+			}
+			profile := store.SaveProfile(req.Name, req.Type, req.Config)
+			jsonResponse(w, http.StatusCreated, profile)
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+
+	mux.HandleFunc("/api/v1/profiles/", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		rawID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/profiles/"), "/")
+		id, _ := url.PathUnescape(rawID)
+		id = strings.TrimSpace(id)
+
+		switch r.Method {
+		case "PUT", "POST":
+			var req struct {
+				Name   string                  `json:"name"`
+				Config mongopkg.EndpointConfig `json:"config"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+				return
+			}
+			updated, ok := store.UpdateProfile(id, req.Name, req.Config)
+			if !ok {
+				jsonResponse(w, http.StatusNotFound, map[string]string{"error": "Profile not found"})
+				return
+			}
+			jsonResponse(w, http.StatusOK, updated)
+
+		case "DELETE":
+			deleted := store.DeleteProfile(id)
+			jsonResponse(w, http.StatusOK, map[string]bool{"deleted": deleted})
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
 
 	// 7. WebSocket live progress endpoint
 	// Auth via ?token= query parameter (browsers can't set headers on WebSocket connections)

@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CloneJob } from './types';
-import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, logoutUser } from './api/client';
-import { seedDefaultProfileIfNeeded } from './utils/profileStorage';
+import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, listProfiles, logoutUser, saveProfile } from './api/client';
 import { Header } from './components/Common/Header';
 import { LoginPage } from './components/Common/LoginPage';
 import { ProductionDashboard } from './components/Dashboard/ProductionDashboard';
@@ -72,10 +71,28 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
     } catch (e) {}
   }
 
-  // Seed default target profile from localStorage settings on first boot.
-  // This replaces the old .env DEFAULT_TARGET_URI seeding that happened on the server.
+  // Seed default target profile from localStorage settings into the backend (data/profiles.json)
+  // on first boot if no profiles exist yet. This replaces the old .env DEFAULT_TARGET_URI seeding.
   useEffect(() => {
-    seedDefaultProfileIfNeeded();
+    async function seedIfNeeded() {
+      try {
+        const { getSettings } = await import('./utils/profileStorage');
+        const settings = getSettings();
+        if (!settings.defaultTargetURI) return;
+
+        const existing = await listProfiles();
+        const defaultName = settings.defaultTargetName || 'Default Target';
+        const alreadyExists = existing.some(
+          (p) => p.type === 'target' && p.name === defaultName
+        );
+        if (!alreadyExists) {
+          await saveProfile(defaultName, 'target', { uri: settings.defaultTargetURI });
+        }
+      } catch {
+        // ignore — settings not configured or API unavailable
+      }
+    }
+    seedIfNeeded();
   }, []);
 
   // Restore active or paused job on initial page load/refresh

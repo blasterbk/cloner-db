@@ -14,7 +14,7 @@ func TestStore_NoMockProfilesSeeded(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	s := NewStore(tempDir, "")
+	s := NewStore(tempDir)
 	profiles := s.ListProfiles()
 
 	if len(profiles) != 0 {
@@ -29,7 +29,7 @@ func TestStore_SaveAndListProfiles(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	s := NewStore(tempDir, "")
+	s := NewStore(tempDir)
 
 	cfg := mongopkg.EndpointConfig{
 		URI: "mongodb://user:pass@172.236.185.175:27017/prod_db",

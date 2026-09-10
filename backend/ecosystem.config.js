@@ -26,7 +26,7 @@ module.exports = {
 
       // --- Graceful Shutdown ---
       // IMPORTANT: mongoclone needs time to flush checkpoints before dying.
-      //   1. Pause all running jobs + write checkpoints to MongoDB (~2-5s)
+      //   1. Pause all running jobs + write checkpoints to local disk (~2-5s)
       //   2. Drain in-flight HTTP connections (~15s max in graceful shutdown code)
       // Give 25 seconds before SIGKILL (PM2 default is only 1.6s — far too short).
       kill_timeout: 25000,
@@ -66,7 +66,6 @@ module.exports = {
         // --- Optional CPU throttling (uncomment if this server runs other workloads) ---
         // GOMAXPROCS: '2',    // Limit Go to 2 OS threads instead of all 4 cores
         // DATA_DIR: 'data',
-        // PROFILES_DB_URI: 'mongodb://...',
       },
 
       // Lower OS scheduling priority so other processes aren't starved during clones.
