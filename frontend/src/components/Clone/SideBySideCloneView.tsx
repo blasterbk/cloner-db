@@ -576,17 +576,6 @@ export const SideBySideCloneView: React.FC<SideBySideCloneViewProps> = ({
     setCancelling(true);
     try {
       await cancelJob(targetJobId);
-      try {
-        const raw = localStorage.getItem('mongoclone_dismissed_job_ids');
-        const list: string[] = raw ? JSON.parse(raw) : [];
-        if (!list.includes(targetJobId)) {
-          list.push(targetJobId);
-        }
-        localStorage.setItem('mongoclone_dismissed_job_ids', JSON.stringify(list));
-        localStorage.setItem('mongoclone_dismissed_job_id', targetJobId);
-        localStorage.removeItem('mongoclone_active_job_id');
-        localStorage.removeItem('mongoclone_selected_db_name');
-      } catch (e) {}
       setActiveJob(null);
       onBack();
     } catch (e: any) {

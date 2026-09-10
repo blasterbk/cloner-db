@@ -45,9 +45,6 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
   // Return to home page whenever resetKey updates (e.g. user clicked "Production Databases" or logo in header)
   useEffect(() => {
     setSelectedDbForClone(null);
-    try {
-      localStorage.removeItem('mongoclone_selected_db_name');
-    } catch (e) {}
   }, [resetKey]);
 
   // Add Production DB Modal state
@@ -91,27 +88,12 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     } catch (e: any) {
       console.error('Failed to cancel job:', e);
     } finally {
-      try {
-        const raw = localStorage.getItem('mongoclone_dismissed_job_ids');
-        const list: string[] = raw ? JSON.parse(raw) : [];
-        if (!list.includes(targetJobId)) {
-          list.push(targetJobId);
-        }
-        localStorage.setItem('mongoclone_dismissed_job_ids', JSON.stringify(list));
-        localStorage.setItem('mongoclone_dismissed_job_id', targetJobId);
-        localStorage.removeItem('mongoclone_active_job_id');
-        localStorage.removeItem('mongoclone_selected_db_name');
-      } catch (e) {}
       setActiveJob(null);
       setCancellingActiveJob(false);
     }
   }
 
   useEffect(() => {
-    // Clear any stale removed database tombstones from local storage
-    try {
-      localStorage.removeItem('mongoclone_removed_dbs');
-    } catch (e) {}
     // Non-blocking background sync
     loadProdDatabases(false);
   }, []);

@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CloneJob } from './types';
-import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, listProfiles, logoutUser, saveProfile } from './api/client';
+import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, logoutUser } from './api/client';
 import { Header } from './components/Common/Header';
 import { LoginPage } from './components/Common/LoginPage';
 import { ProductionDashboard } from './components/Dashboard/ProductionDashboard';
 import { TestDashboard } from './components/Dashboard/TestDashboard';
 import { CloneHistory } from './components/History/CloneHistory';
 
-// ─── AuthGate ────────────────────────────────────────────────────────────────
+// ─── AuthGate ─────────────────────────────────────────────────────────────────
 // A thin wrapper that owns the auth token state. When unauthenticated it renders
 // only the LoginPage; once logged in it renders the main App shell.
 // This pattern avoids conditional hook calls inside the main component.
@@ -36,7 +36,7 @@ const AuthGate: React.FC = () => {
   );
 };
 
-// ─── Main App ────────────────────────────────────────────────────────────────
+// ─── Main App ─────────────────────────────────────────────────────────────────
 
 interface AppProps {
   onLogout: () => void;
@@ -46,107 +46,36 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'test-databases' | 'history'>('dashboard');
   const [activeJob, setActiveJob] = useState<CloneJob | null>(null);
   const [resetDashboardKey, setResetDashboardKey] = useState<number>(0);
+
   // WebSocket health tracking for smart polling fallback
   const [wsConnected, setWsConnected] = useState(false);
   const wsDisconnectedSince = useRef<number | null>(null);
+
+  // UI Scale / Density state — in-memory only, resets to default on refresh
+  const [uiScale, setUiScale] = useState<number>(0.65);
 
   function handleNavigateHome() {
     setActiveTab('dashboard');
     setResetDashboardKey((prev) => prev + 1);
   }
 
-  // UI Scale / Density state (defaults to 0.65 / 60% compact view as requested)
-  const [uiScale, setUiScale] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('mongoclone_uiscale');
-      if (saved) return parseFloat(saved);
-    } catch (e) {}
-    return 0.65;
-  });
-
-  function handleSetUiScale(scale: number) {
-    setUiScale(scale);
-    try {
-      localStorage.setItem('mongoclone_uiscale', scale.toString());
-    } catch (e) {}
-  }
-
-  // Seed default target profile from localStorage settings into the backend (data/profiles.json)
-  // on first boot if no profiles exist yet. This replaces the old .env DEFAULT_TARGET_URI seeding.
-  useEffect(() => {
-    async function seedIfNeeded() {
-      try {
-        const { getSettings } = await import('./utils/profileStorage');
-        const settings = getSettings();
-        if (!settings.defaultTargetURI) return;
-
-        const existing = await listProfiles();
-        const defaultName = settings.defaultTargetName || 'Default Target';
-        const alreadyExists = existing.some(
-          (p) => p.type === 'target' && p.name === defaultName
-        );
-        if (!alreadyExists) {
-          await saveProfile(defaultName, 'target', { uri: settings.defaultTargetURI });
-        }
-      } catch {
-        // ignore — settings not configured or API unavailable
-      }
-    }
-    seedIfNeeded();
-  }, []);
-
-  // Restore active or paused job on initial page load/refresh
+  // Restore the active RUNNING job on page load by querying the server directly
   useEffect(() => {
     async function restoreActiveJob() {
       try {
-        const savedJobId = localStorage.getItem('mongoclone_active_job_id');
-        let dismissedIds: string[] = [];
-        try {
-          const raw = localStorage.getItem('mongoclone_dismissed_job_ids');
-          if (raw) dismissedIds = JSON.parse(raw);
-          const legacy = localStorage.getItem('mongoclone_dismissed_job_id');
-          if (legacy && !dismissedIds.includes(legacy)) dismissedIds.push(legacy);
-        } catch (e) {}
-
-        if (savedJobId && !dismissedIds.includes(savedJobId)) {
-          try {
-            const savedJob = await getJob(savedJobId);
-            if (savedJob && (savedJob.status === 'RUNNING' || savedJob.status === 'PAUSED')) {
-              setActiveJob(savedJob);
-              return;
-            }
-          } catch (e) {
-            // fallback to listJobs
-          }
-        }
-
-        // Only auto-restore an actively RUNNING job if one is in progress across the cluster.
-        // Never auto-promote old PAUSED or interrupted jobs to hijack the top dashboard banner.
         const jobs = await listJobs();
         if (jobs && jobs.length > 0) {
-          const runningJob = jobs.find(
-            (j) => j.status === 'RUNNING' && !dismissedIds.includes(j.id)
-          );
+          const runningJob = jobs.find((j) => j.status === 'RUNNING');
           if (runningJob) {
             setActiveJob(runningJob);
-            localStorage.setItem('mongoclone_active_job_id', runningJob.id);
           }
         }
-      } catch (e) {
-        // ignore
+      } catch (_) {
+        // ignore — server may not be ready yet
       }
     }
     restoreActiveJob();
   }, []);
-
-  // Save active job ID to localStorage when changed
-  useEffect(() => {
-    if (activeJob && (activeJob.status === 'RUNNING' || activeJob.status === 'PAUSED')) {
-      localStorage.setItem('mongoclone_active_job_id', activeJob.id);
-    } else {
-      localStorage.removeItem('mongoclone_active_job_id');
-    }
-  }, [activeJob?.id, activeJob?.status]);
 
   // Connect to live WebSocket progress stream — tracks connection health for smart polling
   useEffect(() => {
@@ -198,7 +127,6 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
   }, []);
 
   // Smart HTTP Polling Fallback — activates only when WebSocket has been disconnected for >3s.
-  // Uses 2s interval instead of 800ms to reduce API call volume during normal operation.
   useEffect(() => {
     if (!activeJob || (activeJob.status !== 'PENDING' && activeJob.status !== 'RUNNING')) {
       return;
@@ -214,7 +142,7 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
         if (fresh) {
           setActiveJob(fresh);
         }
-      } catch (e) {
+      } catch (_) {
         // ignore
       }
     }, 2000);
@@ -236,7 +164,7 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
         }}
         activeJobsCount={activeJob?.status === 'RUNNING' ? 1 : 0}
         uiScale={uiScale}
-        setUiScale={handleSetUiScale}
+        setUiScale={setUiScale}
         onLogout={onLogout}
         wsConnected={wsConnected}
       />
