@@ -1,28 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { CloneJob } from '../../types';
-import { listJobs, deleteJob, resumeJob } from '../../api/client';
+import { listJobs, deleteJob, deleteJobsBulk, clearAllJobs, resumeJob } from '../../api/client';
 import { StatusBadge } from '../Common/StatusBadge';
-import { MetricCard } from '../Common/MetricCard';
 import {
-  History,
   Trash2,
-  ExternalLink,
   RefreshCw,
   Database,
-  Calendar,
-  Layers,
-  Clock,
-  Zap,
   Search,
-  CheckCircle2,
   Terminal,
   X,
-  FileText,
-  Activity,
-  ArrowRight,
   ArrowLeft,
   Play,
-  RotateCcw,
+  CheckSquare,
+  Square,
+  MinusSquare,
+  Eraser,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface CloneHistoryProps {
@@ -37,6 +30,19 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [selectedAuditJob, setSelectedAuditJob] = useState<CloneJob | null>(null);
 
+  // Single delete modal
+  const [jobToDelete, setJobToDelete] = useState<CloneJob | null>(null);
+
+  // Multi-select state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectMode, setSelectMode] = useState(false);
+
+  // Bulk delete modal
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+
+  // Clear all modal
+  const [showClearAllModal, setShowClearAllModal] = useState(false);
+
   useEffect(() => {
     loadJobs();
   }, []);
@@ -45,11 +51,7 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
     setLoading(true);
     try {
       const data = await listJobs();
-      if (data && data.length > 0) {
-        setJobs(data);
-      } else {
-        setJobs([]);
-      }
+      setJobs(data && data.length > 0 ? data : []);
     } catch (e) {
       console.error('Failed to load jobs list:', e);
       setJobs([]);
@@ -58,37 +60,7 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
     }
   }
 
-  const [jobToDelete, setJobToDelete] = useState<CloneJob | null>(null);
-
-  async function confirmDeleteJob() {
-    if (!jobToDelete) return;
-    const id = jobToDelete.id;
-    try {
-      await deleteJob(id);
-      setJobs(jobs.filter((j) => j.id !== id));
-    } catch (e) {
-      setJobs(jobs.filter((j) => j.id !== id));
-    }
-    setJobToDelete(null);
-  }
-
-  function formatTime(sec: number): string {
-    if (!sec || sec <= 0) return '0s';
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    if (m > 0) return `${m}m ${s}s`;
-    return `${s}s`;
-  }
-
-  function formatBytes(bytes?: number): string {
-    if (!bytes || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  }
-
-  // Filter and search
+  // ─── Filter & search ─────────────────────────────────────────────────────────
   const filtered = jobs.filter((j) => {
     const matchesStatus =
       filterStatus === 'all' ||
@@ -107,9 +79,93 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
   const totalVolume = jobs.reduce((acc, j) => acc + (j.progress?.transferred_bytes || 0), 0);
   const totalDocs = jobs.reduce((acc, j) => acc + (j.progress?.transferred_docs || 0), 0);
 
+  function formatTime(sec: number): string {
+    if (!sec || sec <= 0) return '0s';
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function formatBytes(bytes?: number): string {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  // ─── Single delete ────────────────────────────────────────────────────────────
+  async function confirmDeleteJob() {
+    if (!jobToDelete) return;
+    const id = jobToDelete.id;
+    try { await deleteJob(id); } catch (_) {}
+    setJobs((prev) => prev.filter((j) => j.id !== id));
+    setSelectedIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
+    setJobToDelete(null);
+  }
+
+  // ─── Multi-select helpers ─────────────────────────────────────────────────────
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  }
+
+  const allFilteredIds = filtered.map((j) => j.id);
+  const allSelected = allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedIds.has(id));
+  const someSelected = allFilteredIds.some((id) => selectedIds.has(id));
+
+  function toggleSelectAll() {
+    if (allSelected) {
+      setSelectedIds((prev) => {
+        const n = new Set(prev);
+        allFilteredIds.forEach((id) => n.delete(id));
+        return n;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const n = new Set(prev);
+        allFilteredIds.forEach((id) => n.add(id));
+        return n;
+      });
+    }
+  }
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }
+
+  // ─── Bulk delete ──────────────────────────────────────────────────────────────
+  async function confirmBulkDelete() {
+    const ids = Array.from(selectedIds);
+    try { await deleteJobsBulk(ids); } catch (_) {}
+    setJobs((prev) => prev.filter((j) => !selectedIds.has(j.id)));
+    setSelectedIds(new Set());
+    setSelectMode(false);
+    setShowBulkDeleteModal(false);
+  }
+
+  // ─── Clear all ────────────────────────────────────────────────────────────────
+  async function confirmClearAll() {
+    try { await clearAllJobs(); } catch (_) {}
+    // Remove all non-running jobs from local state
+    setJobs((prev) => prev.filter((j) => j.status === 'RUNNING'));
+    setSelectedIds(new Set());
+    setSelectMode(false);
+    setShowClearAllModal(false);
+  }
+
+  const selectedCount = Array.from(selectedIds).filter((id) =>
+    filtered.some((j) => j.id === id)
+  ).length;
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto animate-in fade-in duration-200">
-      {/* Top Back Navigation */}
+      {/* Back Navigation */}
       {onBack && (
         <div className="flex items-center pb-1">
           <button
@@ -122,7 +178,7 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
         </div>
       )}
 
-      {/* Top Banner & Stats Overview */}
+      {/* Top Banner & Stats */}
       <div className="glass-panel p-6 rounded-3xl border border-slate-800/80 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
           <div className="flex items-center gap-2 mb-1.5">
@@ -131,11 +187,11 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
             </span>
             <span className="text-xs text-slate-500">&bull;</span>
             <span className="text-xs font-mono text-slate-400">
-              Real-time Migration & PITR Performance Logs
+              Real-time Migration &amp; PITR Performance Logs
             </span>
           </div>
           <h2 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
-            Clone & Restore Job History
+            Clone &amp; Restore Job History
           </h2>
           <p className="text-xs sm:text-sm text-slate-400 mt-1">
             Complete operational audit logs, throughput statistics, and telemetry records of past database clone operations.
@@ -159,8 +215,9 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
         </div>
       </div>
 
-      {/* Filter and Search Bar */}
+      {/* Filter / Search / Actions Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        {/* Left: Search + Filters */}
         <div className="flex flex-wrap items-center gap-3 flex-1 max-w-xl">
           <div className="relative flex-1 min-w-[220px]">
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -207,17 +264,100 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
           </div>
         </div>
 
-        <button
-          onClick={loadJobs}
-          disabled={loading}
-          className="self-start sm:self-auto p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/80 transition-colors flex items-center gap-1.5 text-xs font-medium"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-          <span>Refresh History</span>
-        </button>
+        {/* Right: Action Buttons */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Select / Exit select mode */}
+          {!selectMode ? (
+            <button
+              onClick={() => setSelectMode(true)}
+              disabled={filtered.length === 0}
+              className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/80 transition-colors flex items-center gap-1.5 text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Select multiple records"
+            >
+              <CheckSquare className="w-3.5 h-3.5" />
+              <span>Select</span>
+            </button>
+          ) : (
+            <button
+              onClick={exitSelectMode}
+              className="p-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 transition-colors flex items-center gap-1.5 text-xs font-medium"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Cancel</span>
+            </button>
+          )}
+
+          {/* Clear All History */}
+          {!selectMode && (
+            <button
+              onClick={() => setShowClearAllModal(true)}
+              disabled={jobs.filter((j) => j.status !== 'RUNNING').length === 0}
+              className="p-2.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:border-rose-500/50 transition-colors flex items-center gap-1.5 text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Clear all history"
+            >
+              <Eraser className="w-3.5 h-3.5" />
+              <span>Clear History</span>
+            </button>
+          )}
+
+          {/* Bulk Delete (shown when in select mode and something is selected) */}
+          {selectMode && selectedIds.size > 0 && (
+            <button
+              onClick={() => setShowBulkDeleteModal(true)}
+              className="p-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-slate-950 border border-rose-400 transition-colors flex items-center gap-1.5 text-xs font-bold shadow-lg shadow-rose-500/25"
+            >
+              <Trash2 className="w-3.5 h-3.5 fill-slate-950" />
+              <span>Delete {selectedIds.size} Selected</span>
+            </button>
+          )}
+
+          {/* Refresh */}
+          <button
+            onClick={loadJobs}
+            disabled={loading}
+            className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/80 transition-colors flex items-center gap-1.5 text-xs font-medium"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
 
-      {/* History Cards Grid */}
+      {/* Select All / Deselect bar (when in select mode) */}
+      {selectMode && filtered.length > 0 && (
+        <div className="flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-slate-900/80 border border-slate-700/60 text-xs">
+          <button
+            onClick={toggleSelectAll}
+            className="flex items-center gap-2 text-slate-300 hover:text-white transition-colors font-medium"
+          >
+            {allSelected ? (
+              <CheckSquare className="w-4 h-4 text-brand-400" />
+            ) : someSelected ? (
+              <MinusSquare className="w-4 h-4 text-brand-400" />
+            ) : (
+              <Square className="w-4 h-4" />
+            )}
+            {allSelected ? 'Deselect All' : 'Select All'}
+          </button>
+          <span className="text-slate-600">|</span>
+          <span className="text-slate-400">
+            {selectedIds.size} of {filtered.length} selected
+          </span>
+          {selectedIds.size > 0 && (
+            <>
+              <span className="text-slate-600">|</span>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                Clear selection
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* History Cards */}
       {loading ? (
         <div className="p-16 text-center glass-panel rounded-2xl text-xs text-slate-400">
           Loading migration history...
@@ -231,12 +371,32 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
         <div className="grid grid-cols-1 gap-4">
           {filtered.map((job) => {
             const isPITR = job.mode === 'POINT_IN_TIME_PITR';
+            const isSelected = selectedIds.has(job.id);
 
             return (
               <div
                 key={job.id}
-                className="glass-panel p-5 sm:p-6 rounded-3xl border border-slate-800/80 hover:border-slate-700 transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-5 bg-slate-900/60 hover:bg-slate-900/90 shadow-lg"
+                className={`glass-panel p-5 sm:p-6 rounded-3xl border transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-5 bg-slate-900/60 hover:bg-slate-900/90 shadow-lg ${
+                  isSelected
+                    ? 'border-brand-500/60 bg-brand-500/5 shadow-brand-500/10'
+                    : 'border-slate-800/80 hover:border-slate-700'
+                }`}
               >
+                {/* Checkbox (shown in select mode) */}
+                {selectMode && (
+                  <button
+                    onClick={() => toggleSelect(job.id)}
+                    className="shrink-0 self-start lg:self-center -ml-1"
+                    aria-label={isSelected ? 'Deselect' : 'Select'}
+                  >
+                    {isSelected ? (
+                      <CheckSquare className="w-5 h-5 text-brand-400" />
+                    ) : (
+                      <Square className="w-5 h-5 text-slate-600 hover:text-slate-400 transition-colors" />
+                    )}
+                  </button>
+                )}
+
                 {/* Left: Job Name & Details */}
                 <div className="space-y-2.5 min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2.5">
@@ -331,7 +491,7 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
         </div>
       )}
 
-      {/* Audit Logs Modal */}
+      {/* ─── Audit Logs Modal ───────────────────────────────────────────────────── */}
       {selectedAuditJob && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">
           <div className="glass-panel w-full max-w-3xl max-h-[85vh] rounded-3xl border border-slate-700 p-6 space-y-5 shadow-2xl flex flex-col overflow-hidden bg-slate-900/95">
@@ -345,7 +505,7 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
                     {selectedAuditJob.name}
                   </h3>
                   <p className="text-xs text-slate-400">
-                    Execution Telemetry & Audit Logs ({selectedAuditJob.logs.length} entries)
+                    Execution Telemetry &amp; Audit Logs ({selectedAuditJob.logs.length} entries)
                   </p>
                 </div>
               </div>
@@ -399,7 +559,7 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
         </div>
       )}
 
-      {/* Professional Delete Confirmation Modal */}
+      {/* ─── Single Delete Confirmation Modal ──────────────────────────────────── */}
       {jobToDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
           <div className="glass-panel w-full max-w-md rounded-3xl border border-rose-500/30 p-6 space-y-5 shadow-2xl bg-slate-900/95 animate-in zoom-in-95 duration-200">
@@ -408,17 +568,17 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
                 <Trash2 className="w-6 h-6" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-white">
-                  Delete Migration Record?
-                </h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Remove job history and telemetry logs
-                </p>
+                <h3 className="text-base font-bold text-white">Delete Migration Record?</h3>
+                <p className="text-xs text-slate-400 mt-0.5">Remove job history and telemetry logs</p>
               </div>
             </div>
 
             <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/60 p-3.5 rounded-2xl border border-slate-800">
-              Are you sure you want to delete <span className="text-white font-mono font-bold bg-slate-800 px-1.5 py-0.5 rounded">{jobToDelete.name}</span>? This will permanently delete its audit logs.
+              Are you sure you want to delete{' '}
+              <span className="text-white font-mono font-bold bg-slate-800 px-1.5 py-0.5 rounded">
+                {jobToDelete.name}
+              </span>
+              ? This will permanently delete its audit logs.
             </p>
 
             <div className="flex items-center justify-end gap-3 pt-2">
@@ -429,7 +589,6 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
               >
                 Cancel
               </button>
-
               <button
                 type="button"
                 onClick={confirmDeleteJob}
@@ -437,6 +596,92 @@ export const CloneHistory: React.FC<CloneHistoryProps> = ({ onSelectJob, onBack 
               >
                 <Trash2 className="w-3.5 h-3.5 fill-slate-950" />
                 <span>Delete Record</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Bulk Delete Confirmation Modal ────────────────────────────────────── */}
+      {showBulkDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="glass-panel w-full max-w-md rounded-3xl border border-rose-500/30 p-6 space-y-5 shadow-2xl bg-slate-900/95 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3.5">
+              <div className="p-3 rounded-2xl bg-rose-500/15 text-rose-400 border border-rose-500/30 shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">
+                  Delete {selectedIds.size} Record{selectedIds.size !== 1 ? 's' : ''}?
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">Bulk delete selected migration records</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/60 p-3.5 rounded-2xl border border-slate-800">
+              This will permanently delete{' '}
+              <span className="text-rose-300 font-bold">{selectedIds.size} selected record{selectedIds.size !== 1 ? 's' : ''}</span>{' '}
+              and all their associated audit logs. This action cannot be undone.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkDeleteModal(false)}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmBulkDelete}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-slate-950 transition-all shadow-lg shadow-rose-500/25 flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5 fill-slate-950" />
+                <span>Delete {selectedIds.size} Record{selectedIds.size !== 1 ? 's' : ''}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Clear All History Confirmation Modal ──────────────────────────────── */}
+      {showClearAllModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="glass-panel w-full max-w-md rounded-3xl border border-amber-500/30 p-6 space-y-5 shadow-2xl bg-slate-900/95 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3.5">
+              <div className="p-3 rounded-2xl bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Clear All History?</h3>
+                <p className="text-xs text-slate-400 mt-0.5">Wipe all completed, failed and paused records</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/60 p-3.5 rounded-2xl border border-slate-800">
+              This will permanently delete{' '}
+              <span className="text-amber-300 font-bold">all non-running job records</span>{' '}
+              ({jobs.filter((j) => j.status !== 'RUNNING').length} records) and their audit logs.
+              Currently <span className="text-emerald-300 font-bold">running</span> jobs will be preserved.
+              This action cannot be undone.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowClearAllModal(false)}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmClearAll}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-all shadow-lg shadow-amber-500/25 flex items-center gap-1.5"
+              >
+                <Eraser className="w-3.5 h-3.5" />
+                <span>Clear All History</span>
               </button>
             </div>
           </div>

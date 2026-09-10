@@ -156,6 +156,31 @@ export async function deleteJob(id: string): Promise<boolean> {
   return data.deleted;
 }
 
+/** Bulk-delete multiple jobs in a single request. Returns the number deleted. */
+export async function deleteJobsBulk(ids: string[]): Promise<number> {
+  const res = await fetch(`${API_BASE}/jobs`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+    body: JSON.stringify({ ids }),
+  });
+  if (!res.ok) throw new Error('Bulk delete failed');
+  const data = await res.json();
+  return data.deleted ?? 0;
+}
+
+/** Delete ALL non-running job history records. Returns the number cleared. */
+export async function clearAllJobs(): Promise<number> {
+  const res = await fetch(`${API_BASE}/jobs`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+    body: JSON.stringify({ clear_all: true }),
+  });
+  if (!res.ok) throw new Error('Clear history failed');
+  const data = await res.json();
+  return data.cleared ?? 0;
+}
+
+
 // ─── Profiles (backend API → data/profiles.json) ───────────────────────────────────
 // Profiles are stored server-side in data/profiles.json via the backend REST API.
 // No MongoDB dependency — the backend uses local JSON files only.

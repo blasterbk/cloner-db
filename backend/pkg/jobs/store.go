@@ -175,6 +175,41 @@ func (s *Store) DeleteJob(id string) bool {
 	return true
 }
 
+// DeleteJobsBulk removes multiple job records atomically in one disk write.
+// Skips any IDs that do not exist. Returns the count of actually deleted jobs.
+func (s *Store) DeleteJobsBulk(ids []string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deleted := 0
+	for _, id := range ids {
+		if _, ok := s.jobs[id]; ok {
+			delete(s.jobs, id)
+			deleted++
+		}
+	}
+	if deleted > 0 {
+		s.save()
+	}
+	return deleted
+}
+
+// ClearAllJobs removes every job record from memory and local storage.
+// Active (RUNNING) jobs are NOT removed — they will remain in the map.
+// Returns the count of records cleared.
+func (s *Store) ClearAllJobs() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cleared := 0
+	for id, j := range s.jobs {
+		if j.Status != types.StatusRunning {
+			delete(s.jobs, id)
+			cleared++
+		}
+	}
+	s.save()
+	return cleared
+}
+
 // SaveProfile creates or updates a saved connection profile in local storage.
 func (s *Store) SaveProfile(name, pType string, cfg mongopkg.EndpointConfig) SavedProfile {
 	s.mu.Lock()

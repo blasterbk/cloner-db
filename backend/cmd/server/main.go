@@ -367,6 +367,28 @@ func main() {
 
 			jsonResponse(w, http.StatusAccepted, job.GetSafeSnapshot())
 
+		case "DELETE":
+			// Bulk delete: {"ids": ["id1","id2",...]} OR clear-all: {"clear_all": true}
+			var body struct {
+				IDs      []string `json:"ids"`
+				ClearAll bool     `json:"clear_all"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+				return
+			}
+			if body.ClearAll {
+				cleared := store.ClearAllJobs()
+				jsonResponse(w, http.StatusOK, map[string]any{"cleared": cleared})
+				return
+			}
+			if len(body.IDs) == 0 {
+				jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Provide 'ids' array or set 'clear_all' to true"})
+				return
+			}
+			deleted := store.DeleteJobsBulk(body.IDs)
+			jsonResponse(w, http.StatusOK, map[string]any{"deleted": deleted})
+
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
