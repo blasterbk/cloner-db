@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,24 +26,28 @@ const (
 
 // Manager handles login/logout and token validation.
 type Manager struct {
-	username string
-	password string
-	enabled  bool
+	username    string
+	password    string
+	enabled     bool
+	sessionFile string // path to the on-disk session store
 
 	mu       sync.RWMutex
 	sessions map[string]time.Time // token → last seen
 }
 
 // New creates an auth manager. If username is empty, auth is disabled.
-func New(username, password string) *Manager {
+// dataDir is the directory where sessions.json will be persisted.
+func New(username, password, dataDir string) *Manager {
 	m := &Manager{
-		username: username,
-		password: password,
-		enabled:  username != "",
-		sessions: make(map[string]time.Time),
+		username:    username,
+		password:    password,
+		enabled:     username != "",
+		sessionFile: filepath.Join(dataDir, "sessions.json"),
+		sessions:    make(map[string]time.Time),
 	}
 	if m.enabled {
 		log.Printf("[auth] Authentication ENABLED — login required to access MongoClone")
+		m.loadSessions() // restore sessions from disk on startup
 		go m.cleanupLoop()
 	} else {
 		log.Printf("[auth] Authentication DISABLED — set AUTH_USERNAME in .env to enable")
@@ -70,6 +76,7 @@ func (m *Manager) Login(username, password string) (token string, ok bool) {
 	m.sessions[token] = time.Now()
 	m.mu.Unlock()
 
+	m.saveSessions() // persist immediately
 	return token, true
 }
 
@@ -89,9 +96,11 @@ func (m *Manager) Validate(token string) bool {
 	}
 	if time.Since(ts) > tokenTTL {
 		delete(m.sessions, token)
+		go m.saveSessions()
 		return false
 	}
 	m.sessions[token] = time.Now() // refresh TTL on activity
+	go m.saveSessions()            // persist the refreshed timestamp
 	return true
 }
 
@@ -100,6 +109,7 @@ func (m *Manager) Logout(token string) {
 	m.mu.Lock()
 	delete(m.sessions, token)
 	m.mu.Unlock()
+	m.saveSessions() // persist immediately
 }
 
 // extractToken pulls the bearer token from the Authorization header or
@@ -146,11 +156,67 @@ func (m *Manager) cleanupLoop() {
 		time.Sleep(cleanupEvery)
 		now := time.Now()
 		m.mu.Lock()
+		changed := false
 		for token, ts := range m.sessions {
 			if now.Sub(ts) > tokenTTL {
 				delete(m.sessions, token)
+				changed = true
 			}
 		}
 		m.mu.Unlock()
+		if changed {
+			m.saveSessions()
+		}
 	}
+}
+
+// saveSessions writes the current session map to disk.
+// Called without the mutex held — uses a separate read lock.
+func (m *Manager) saveSessions() {
+	if m.sessionFile == "" {
+		return
+	}
+	m.mu.RLock()
+	// Snapshot sessions while under read lock
+	snap := make(map[string]time.Time, len(m.sessions))
+	for k, v := range m.sessions {
+		snap[k] = v
+	}
+	m.mu.RUnlock()
+
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		log.Printf("[auth] Failed to marshal sessions: %v", err)
+		return
+	}
+	if err := os.WriteFile(m.sessionFile, data, 0600); err != nil {
+		log.Printf("[auth] Failed to write sessions file: %v", err)
+	}
+}
+
+// loadSessions reads previously persisted sessions from disk, discarding expired ones.
+func (m *Manager) loadSessions() {
+	if m.sessionFile == "" {
+		return
+	}
+	data, err := os.ReadFile(m.sessionFile)
+	if err != nil {
+		return // file doesn't exist yet — first run
+	}
+	var saved map[string]time.Time
+	if err := json.Unmarshal(data, &saved); err != nil {
+		log.Printf("[auth] Ignoring corrupt sessions file: %v", err)
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	loaded := 0
+	for token, ts := range saved {
+		if now.Sub(ts) <= tokenTTL {
+			m.sessions[token] = ts
+			loaded++
+		}
+	}
+	m.mu.Unlock()
+	log.Printf("[auth] Restored %d active session(s) from disk", loaded)
 }

@@ -11,6 +11,36 @@ import {
 
 const API_BASE = '/api/v1';
 
+/**
+ * Thrown by any API function that receives a 401 Unauthorized response.
+ * App.tsx listens for this and triggers immediate logout + re-login.
+ */
+export class AuthError extends Error {
+  constructor() {
+    super('Session expired — please log in again');
+    this.name = 'AuthError';
+  }
+}
+
+/** Registered callbacks invoked when any API call gets a 401. */
+const unauthorizedCallbacks = new Set<() => void>();
+
+/** Register a callback that fires once on the first 401 response. */
+export function onUnauthorized(cb: () => void): () => void {
+  unauthorizedCallbacks.add(cb);
+  return () => unauthorizedCallbacks.delete(cb);
+}
+
+/** Internal helper — call after any fetch. Throws AuthError on 401. */
+function checkAuth(res: Response): Response {
+  if (res.status === 401) {
+    // Notify all listeners (App.tsx will log the user out)
+    unauthorizedCallbacks.forEach((cb) => cb());
+    throw new AuthError();
+  }
+  return res;
+}
+
 /** Returns the stored auth token (or empty string if not logged in / auth disabled). */
 export function getAuthToken(): string {
   try { return localStorage.getItem('mongoclone_auth_token') ?? ''; } catch { return ''; }
@@ -180,7 +210,7 @@ export async function listJobs(): Promise<CloneJob[]> {
 }
 
 export async function getJob(id: string): Promise<CloneJob> {
-  const res = await fetch(`${API_BASE}/jobs/${id}`, { headers: authHeaders() });
+  const res = checkAuth(await fetch(`${API_BASE}/jobs/${id}`, { headers: authHeaders() }));
   if (!res.ok) throw new Error('Job not found');
   return res.json();
 }

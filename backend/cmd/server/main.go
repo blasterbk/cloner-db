@@ -194,6 +194,7 @@ func main() {
 	authMgr := auth.New(
 		os.Getenv("AUTH_USERNAME"),
 		os.Getenv("AUTH_PASSWORD"),
+		dataDir,
 	)
 
 	mux := http.NewServeMux()

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CloneJob } from './types';
-import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, logoutUser } from './api/client';
+import { connectTelemetryWebSocket, getAuthToken, getJob, listJobs, logoutUser, onUnauthorized, AuthError } from './api/client';
 import { Header } from './components/Common/Header';
 import { LoginPage } from './components/Common/LoginPage';
 import { ProductionDashboard } from './components/Dashboard/ProductionDashboard';
@@ -77,6 +77,18 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
     restoreActiveJob();
   }, []);
 
+  // Register a global 401 listener — fires if any API call returns Unauthorized
+  // (e.g. after a backend restart wipes the in-memory session store).
+  // We clear the local token and invoke onLogout() which causes AuthGate to
+  // unmount App and show LoginPage immediately, stopping all polling/WS.
+  useEffect(() => {
+    const unsubscribe = onUnauthorized(() => {
+      localStorage.removeItem('mongoclone_auth_token');
+      onLogout();
+    });
+    return unsubscribe;
+  }, [onLogout]);
+
   // Connect to live WebSocket progress stream — tracks connection health for smart polling
   useEffect(() => {
     const disconnect = connectTelemetryWebSocket(
@@ -142,8 +154,13 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
         if (fresh) {
           setActiveJob(fresh);
         }
-      } catch (_) {
-        // ignore
+      } catch (err) {
+        if (err instanceof AuthError) {
+          // 401 — the onUnauthorized listener already triggered logout;
+          // stop polling by clearing the interval immediately.
+          clearInterval(interval);
+        }
+        // other errors (network, 404) are ignored — job may still be running
       }
     }, 2000);
 
