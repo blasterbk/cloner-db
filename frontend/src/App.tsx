@@ -143,28 +143,53 @@ export const App: React.FC<AppProps> = ({ onLogout }) => {
     if (!activeJob || (activeJob.status !== 'PENDING' && activeJob.status !== 'RUNNING' && activeJob.status !== 'PAUSED')) {
       return;
     }
-    const interval = setInterval(async () => {
-      // Only poll if WebSocket has been down for more than 3 seconds
-      if (wsConnected) return;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveFailures = 0;
+    let isCancelled = false;
+
+    const poll = async () => {
+      if (isCancelled) return;
+
+      // Only poll if WebSocket is disconnected
+      if (wsConnected) {
+        consecutiveFailures = 0;
+        pollTimer = setTimeout(poll, 2000);
+        return;
+      }
+
       const sinceDisconnect = Date.now() - (wsDisconnectedSince.current ?? Date.now());
-      if (sinceDisconnect < 3000) return;
+      if (sinceDisconnect < 3000) {
+        pollTimer = setTimeout(poll, 1000);
+        return;
+      }
 
       try {
         const fresh = await getJob(activeJob.id);
-        if (fresh) {
+        if (fresh && !isCancelled) {
+          consecutiveFailures = 0;
           setActiveJob(fresh);
         }
       } catch (err) {
         if (err instanceof AuthError) {
-          // 401 — the onUnauthorized listener already triggered logout;
-          // stop polling by clearing the interval immediately.
-          clearInterval(interval);
+          // 401 — the onUnauthorized listener already triggered logout; stop polling
+          return;
         }
-        // other errors (network, 404) are ignored — job may still be running
+        consecutiveFailures++;
       }
-    }, 2000);
 
-    return () => clearInterval(interval);
+      // If failing repeatedly (e.g. server restarting with 502/503), back off to 5s to avoid console spam
+      const delay = consecutiveFailures >= 3 ? 5000 : 2000;
+      if (!isCancelled) {
+        pollTimer = setTimeout(poll, delay);
+      }
+    };
+
+    pollTimer = setTimeout(poll, 2000);
+
+    return () => {
+      isCancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
+    };
   }, [activeJob?.id, activeJob?.status, wsConnected]);
 
   return (

@@ -736,6 +736,7 @@ func main() {
 	log.Printf("[shutdown] Signal '%v' received — pausing running jobs and shutting down...", sig)
 
 	orchestrator.PauseAllRunning()
+	store.Close()
 
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutCancel()
