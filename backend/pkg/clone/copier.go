@@ -3,6 +3,7 @@ package clone
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,9 +97,10 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		numWorkers = 4
 	}
 
-	// Buffer size: numWorkers*2 keeps workers saturated without holding excess docs in RAM.
-	// Reduced from numWorkers*4 to lower peak RSS for large (30M+ doc) clone jobs.
-	batchChan := make(chan docBatch, numWorkers*2)
+	// Buffer size: numWorkers keeps the write workers saturated without holding excess
+	// batches in RAM. Reduced from numWorkers*2 — at batch=5000 docs and 6 workers,
+	// the old buffer could accumulate 60K docs × avg-doc-size bytes at peak RSS.
+	batchChan := make(chan docBatch, numWorkers)
 	var transferredDocs int64
 	var transferredBytes int64
 	var workerWg sync.WaitGroup
@@ -472,6 +474,12 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 	if c.opts.ProgressCallback != nil {
 		c.opts.ProgressCallback(*progress)
 	}
+
+	// Release batch buffer memory back to the GC/OS promptly after each collection finishes.
+	// Without this, Go's GC may not reclaim the large batch doc slices quickly enough during
+	// parallel multi-collection cloning, leading to RSS exceeding PM2 --max-memory-restart limits.
+	currentBatch = nil
+	runtime.GC()
 
 	return progress, nil
 }

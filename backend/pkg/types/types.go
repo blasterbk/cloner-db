@@ -122,6 +122,11 @@ type ProgressTelemetry struct {
 	Collections          map[string]CollectionCopyProgress `json:"collections" bson:"collections"`
 }
 
+// MaxLogEntries is the maximum number of log entries retained in memory per job.
+// Once the limit is reached, the oldest entries are evicted to prevent unbounded RAM growth
+// during long clone operations with many retry events or large collection counts.
+const MaxLogEntries = 2000
+
 // CloneJob represents the full state and history of a clone job.
 type CloneJob struct {
 	mu           sync.RWMutex           `json:"-" bson:"-"`
@@ -143,6 +148,7 @@ type CloneJob struct {
 }
 
 // AddLog appends a timestamped log entry safely.
+// Enforces MaxLogEntries cap: once exceeded, the oldest half is evicted to free memory.
 func (j *CloneJob) AddLog(level, msg string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -153,6 +159,14 @@ func (j *CloneJob) AddLog(level, msg string) {
 		Message:   msg,
 	}
 	j.Logs = append(j.Logs, entry)
+
+	// Cap log entries to prevent unbounded RAM growth during long clone operations.
+	// Evict the oldest half when the limit is reached, retaining the newest entries.
+	if len(j.Logs) > MaxLogEntries {
+		half := MaxLogEntries / 2
+		copy(j.Logs, j.Logs[len(j.Logs)-half:])
+		j.Logs = j.Logs[:half]
+	}
 }
 
 // UpdateProgress updates the progress telemetry thread-safely.

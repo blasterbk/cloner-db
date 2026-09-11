@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,6 +154,10 @@ func loadEnvFile(path string) {
 
 func main() {
 	startTime := time.Now()
+	// Set GC target percentage to 50 (half the default of 100).
+	// This triggers garbage collection when heap grows by 50% instead of 100%,
+	// significantly reducing peak RSS during memory-intensive batch clone operations.
+	debug.SetGCPercent(50)
 	// Load .env file from current working directory (backend root)
 	loadEnvFile(".env")
 	loadEnvFile("../.env") // also try repo root

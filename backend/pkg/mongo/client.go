@@ -41,8 +41,11 @@ func Connect(ctx context.Context, cfg *EndpointConfig) (*mongo.Client, error) {
 	clientOpts.SetHeartbeatInterval(10 * time.Second)
 	clientOpts.SetRetryReads(true)
 	clientOpts.SetRetryWrites(true)
-	clientOpts.SetMaxPoolSize(100)
-	clientOpts.SetMinPoolSize(5)
+	// Connection pool: capped at 10 per client. Clone operations use a streaming cursor
+	// (1 connection) + insert workers (up to numWorkers connections). A pool of 100 held
+	// 5785MB RSS when cloning large databases. 10 per client is sufficient and safe.
+	clientOpts.SetMaxPoolSize(10)
+	clientOpts.SetMinPoolSize(2)
 
 	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {

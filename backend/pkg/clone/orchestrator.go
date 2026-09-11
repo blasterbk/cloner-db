@@ -3,6 +3,7 @@ package clone
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -584,6 +585,9 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 	}
 
 	wg.Wait()
+	// Hint to the GC to release all batch-doc buffers from completed collection workers
+	// before we start index building. This prevents multi-collection RSS accumulation.
+	runtime.GC()
 
 	if ctx.Err() != nil {
 		o.mu.Lock()
