@@ -77,18 +77,74 @@ export async function fetchCatalog(
   return res.json();
 }
 
-export async function fetchConnectionsOverview(): Promise<Array<{
+export async function fetchConnectionsOverview(forceRefresh = false): Promise<Array<{
   profile: SavedProfile;
   online: boolean;
   server_info?: ServerInfo;
   catalog?: ClusterCatalog;
   error?: string;
 }>> {
-  const res = await fetch(`${API_BASE}/mongo/connections/overview`, {
-    headers: authHeaders(),
-  });
+  const url = forceRefresh
+    ? `${API_BASE}/mongo/connections/overview?refresh=1`
+    : `${API_BASE}/mongo/connections/overview`;
+  const res = await fetch(url, { headers: authHeaders() });
   if (!res.ok) throw new Error('Failed to fetch connections overview');
   return res.json();
+}
+
+/**
+ * Async generator that streams the connections overview as NDJSON.
+ * Yields each profile result the moment it arrives from the backend,
+ * enabling progressive card rendering without waiting for all connections.
+ */
+export async function* streamConnectionsOverview(forceRefresh = false): AsyncGenerator<{
+  profile: SavedProfile;
+  online: boolean;
+  server_info?: ServerInfo;
+  catalog?: ClusterCatalog;
+  error?: string;
+}> {
+  const url = forceRefresh
+    ? `${API_BASE}/mongo/connections/overview/stream?refresh=1`
+    : `${API_BASE}/mongo/connections/overview/stream`;
+
+  const res = await fetch(url, { headers: authHeaders() });
+  if (!res.ok || !res.body) throw new Error('Failed to open overview stream');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // Each JSON object is newline-delimited
+      const lines = buffer.split('\n');
+      // Keep the last (potentially incomplete) chunk in the buffer
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          yield JSON.parse(trimmed);
+        } catch {
+          // ignore malformed lines
+        }
+      }
+    }
+    // Flush any remaining data in the buffer
+    if (buffer.trim()) {
+      try {
+        yield JSON.parse(buffer.trim());
+      } catch {
+        // ignore
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 export async function fetchOplogWindow(config: EndpointConfig): Promise<OplogWindow> {

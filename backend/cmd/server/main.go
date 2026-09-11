@@ -29,6 +29,102 @@ import (
 	"github.com/mongoclone/engine/web"
 )
 
+// ─── Overview cache ───────────────────────────────────────────────────────────
+// A lightweight TTL cache shared by both the batch and streaming overview
+// endpoints. Profiles don't change every second; 30 s staleness is fine and
+// removes ALL MongoDB round-trips on repeat page visits.
+
+type connOverviewItem struct {
+	Profile    jobs.SavedProfile        `json:"profile"`
+	Online     bool                     `json:"online"`
+	ServerInfo *mongopkg.ServerInfo     `json:"server_info,omitempty"`
+	Catalog    *mongopkg.ClusterCatalog `json:"catalog,omitempty"`
+	Error      string                   `json:"error,omitempty"`
+}
+
+var (
+	overviewCacheMu      sync.RWMutex
+	overviewCacheData    []connOverviewItem
+	overviewCacheExpires time.Time
+)
+
+const overviewCacheTTL = 30 * time.Second
+
+func getCachedOverview() ([]connOverviewItem, bool) {
+	overviewCacheMu.RLock()
+	defer overviewCacheMu.RUnlock()
+	if overviewCacheData != nil && time.Now().Before(overviewCacheExpires) {
+		return overviewCacheData, true
+	}
+	return nil, false
+}
+
+func setCachedOverview(items []connOverviewItem) {
+	overviewCacheMu.Lock()
+	defer overviewCacheMu.Unlock()
+	overviewCacheData = items
+	overviewCacheExpires = time.Now().Add(overviewCacheTTL)
+}
+
+func invalidateOverviewCache() {
+	overviewCacheMu.Lock()
+	defer overviewCacheMu.Unlock()
+	overviewCacheData = nil
+}
+
+// loadOverviewItems connects to all profiles concurrently and returns results
+// as they arrive via the returned channel. The caller must drain the channel.
+func loadOverviewItems(ctx context.Context, profiles []jobs.SavedProfile) <-chan connOverviewItem {
+	ch := make(chan connOverviewItem, len(profiles))
+	var wg sync.WaitGroup
+	for _, prof := range profiles {
+		wg.Add(1)
+		go func(p jobs.SavedProfile) {
+			defer wg.Done()
+			item := connOverviewItem{Profile: p}
+			fastCfg := p.Config
+			timeout := 4000 * time.Millisecond
+			if fastCfg.TimeoutMs > 4000 {
+				timeout = time.Duration(fastCfg.TimeoutMs) * time.Millisecond
+			}
+			fastCfg.TimeoutMs = int(timeout / time.Millisecond)
+			pCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+
+			client, err := mongopkg.Connect(pCtx, &fastCfg)
+			if err != nil {
+				item.Online = false
+				item.Error = err.Error()
+				ch <- item
+				return
+			}
+			defer client.Disconnect(pCtx) //nolint:errcheck
+
+			info, err := mongopkg.InspectServer(pCtx, client)
+			if err != nil {
+				item.Online = false
+				item.Error = err.Error()
+				ch <- item
+				return
+			}
+			item.Online = true
+			item.ServerInfo = info
+
+			var dbHints []string
+			if dbName := fastCfg.ExtractDatabaseName(); dbName != "" {
+				dbHints = append(dbHints, dbName)
+			}
+			cat, err := mongopkg.InspectCatalog(pCtx, client, false, dbHints...)
+			if err == nil {
+				item.Catalog = cat
+			}
+			ch <- item
+		}(prof)
+	}
+	go func() { wg.Wait(); close(ch) }()
+	return ch
+}
+
 // loadEnvFile reads a .env file and sets environment variables (no external dependency needed)
 func loadEnvFile(path string) {
 	f, err := os.Open(path)
@@ -275,72 +371,84 @@ func main() {
 		jsonResponse(w, http.StatusOK, window)
 	})))
 
-	// 4b. Overview of all saved connections (for the home page)
+	// 4b. Overview of all saved connections — cache-aware batch endpoint
+	// Returns immediately from cache when data is fresh (≤30 s old).
 	mux.HandleFunc("/api/v1/mongo/connections/overview", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		// Force-refresh requested by client (e.g. manual refresh button)
+		forceRefresh := r.URL.Query().Get("refresh") == "1"
+		if forceRefresh {
+			invalidateOverviewCache()
+		}
+
+		// Serve from cache if still warm
+		if cached, ok := getCachedOverview(); ok {
+			w.Header().Set("X-Cache", "HIT")
+			jsonResponse(w, http.StatusOK, cached)
+			return
+		}
+
 		profiles := store.ListProfiles()
-		type ConnOverview struct {
-			Profile      jobs.SavedProfile      `json:"profile"`
-			Online       bool                   `json:"online"`
-			ServerInfo   *mongopkg.ServerInfo   `json:"server_info,omitempty"`
-			Catalog      *mongopkg.ClusterCatalog `json:"catalog,omitempty"`
-			Error        string                 `json:"error,omitempty"`
+		results := make([]connOverviewItem, 0, len(profiles))
+		for item := range loadOverviewItems(r.Context(), profiles) {
+			results = append(results, item)
 		}
-
-		results := make([]ConnOverview, len(profiles))
-		var wg sync.WaitGroup
-
-		for i, prof := range profiles {
-			wg.Add(1)
-			go func(idx int, p jobs.SavedProfile) {
-				defer wg.Done()
-				item := ConnOverview{
-					Profile: p,
-				}
-				fastCfg := p.Config
-				timeout := 4000 * time.Millisecond
-				if fastCfg.TimeoutMs > 4000 {
-					timeout = time.Duration(fastCfg.TimeoutMs) * time.Millisecond
-				}
-				fastCfg.TimeoutMs = int(timeout / time.Millisecond)
-				ctx, cancel := context.WithTimeout(r.Context(), timeout)
-				defer cancel()
-
-				client, err := mongopkg.Connect(ctx, &fastCfg)
-				if err != nil {
-					item.Online = false
-					item.Error = err.Error()
-					results[idx] = item
-					return
-				}
-				defer client.Disconnect(ctx) //nolint:errcheck
-
-				info, err := mongopkg.InspectServer(ctx, client)
-				if err != nil {
-					item.Online = false
-					item.Error = err.Error()
-					results[idx] = item
-					return
-				}
-
-				item.Online = true
-				item.ServerInfo = info
-
-				// Fetch lightweight catalog with target DB hint from URI
-				var dbHints []string
-				if dbName := fastCfg.ExtractDatabaseName(); dbName != "" {
-					dbHints = append(dbHints, dbName)
-				}
-				cat, err := mongopkg.InspectCatalog(ctx, client, false, dbHints...)
-				if err == nil {
-					item.Catalog = cat
-				}
-
-				results[idx] = item
-			}(i, prof)
-		}
-
-		wg.Wait()
+		setCachedOverview(results)
+		w.Header().Set("X-Cache", "MISS")
 		jsonResponse(w, http.StatusOK, results)
+	})))
+
+	// 4c. NDJSON streaming overview — flushes each profile result the instant its
+	// goroutine finishes so the frontend can render cards progressively.
+	// Served from cache when warm; otherwise streams live and populates cache.
+	mux.HandleFunc("/api/v1/mongo/connections/overview/stream", cors(authMgr.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		forceRefresh := r.URL.Query().Get("refresh") == "1"
+		if forceRefresh {
+			invalidateOverviewCache()
+		}
+
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering
+
+		flusher, canFlush := w.(http.Flusher)
+
+		// Cache hit: stream all items in one shot from memory
+		if cached, ok := getCachedOverview(); ok {
+			w.Header().Set("X-Cache", "HIT")
+			for _, item := range cached {
+				data, err := json.Marshal(item)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "%s\n", data)
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+			return
+		}
+
+		// Cache miss: stream live results as goroutines complete
+		w.Header().Set("X-Cache", "MISS")
+		profiles := store.ListProfiles()
+		collected := make([]connOverviewItem, 0, len(profiles))
+
+		for item := range loadOverviewItems(r.Context(), profiles) {
+			data, err := json.Marshal(item)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "%s\n", data)
+			if canFlush {
+				flusher.Flush()
+			}
+			collected = append(collected, item)
+		}
+
+		// Populate cache so the next visit (batch or stream) is instant
+		if len(collected) > 0 {
+			setCachedOverview(collected)
+		}
 	})))
 
 	// 5. Jobs CRUD & Launch

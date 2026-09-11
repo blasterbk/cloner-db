@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  fetchConnectionsOverview,
+  streamConnectionsOverview,
   listProfiles,
   saveProfile,
   updateProfile,
@@ -117,113 +117,133 @@ export const TestDashboard: React.FC<TestDashboardProps> = ({ resetKey }) => {
     loadTestDatabases(false);
   }, []);
 
-  async function loadTestDatabases(showSpinner = true) {
-    if (showSpinner) setRefreshing(true);
+  async function loadTestDatabases(forceRefresh = false) {
     setLoading(true);
+    setRefreshing(forceRefresh);
+
+    // Clear list so cards stream in fresh on explicit refresh
+    if (forceRefresh) setTestDatabases([]);
+
     try {
-      const dbList: TestDatabaseItem[] = [];
+      // Track seen profile IDs to deduplicate
+      const seenProfileIds = new Set<string>();
+      let firstCardRendered = false;
 
-      // Primary: Live connection overview filtered to 'target' type
+      // Primary: stream live connection overview filtered to 'target' type
       try {
-        const data = await fetchConnectionsOverview();
-        if (data && data.length > 0) {
-          data
-            .filter((item) => item.profile.type === 'target')
-            .forEach((item) => {
-              const clusterUri = item.profile.config.uri || '';
-              const profileRawName = item.profile.name || '';
+        for await (const item of streamConnectionsOverview(forceRefresh)) {
+          if (item.profile.type !== 'target') continue;
 
-              const userDbName = extractDbFromProfile(profileRawName);
-              const cleanCluster = extractClusterFromProfile(profileRawName, userDbName);
-              const fallbackDbName = userDbName || profileRawName || 'database';
+          const clusterUri = item.profile.config.uri || '';
+          const profileRawName = item.profile.name || '';
+          const userDbName = extractDbFromProfile(profileRawName);
+          const cleanCluster = extractClusterFromProfile(profileRawName, userDbName);
+          const fallbackDbName = userDbName || profileRawName || 'database';
+          const profileKey = item.profile.id || `${fallbackDbName}-${clusterUri}`;
 
-              if (item.catalog?.databases && item.catalog.databases.length > 0) {
-                const realDbs = item.catalog.databases.filter(
-                  (d) => (d.collections && d.collections.length > 0) || d.size_bytes > 0 || (d.total_collections || 0) > 0
-                );
-                const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
+          // Skip duplicates (shouldn't happen but be safe)
+          if (seenProfileIds.has(profileKey)) continue;
+          seenProfileIds.add(profileKey);
 
-                // For Test Databases: each profile = ONE card.
-                // Pick the physical db that matches the user's registered name (userDbName),
-                // or fall back to the first available database on that server.
-                // Do NOT create a card for every physical database on the cluster.
-                const matchingDb =
-                  dbsToShow.find((d) => d.name.toLowerCase() === userDbName.toLowerCase()) ||
-                  dbsToShow[0];
-
-                const d = matchingDb;
-                const displayName = userDbName || d.name;
-
-                dbList.push({
-                  id: `${item.profile.id}-${displayName}`,
-                  profileId: item.profile.id,
-                  name: displayName,
-                  actualDbName: d.name,
-                  clusterName: cleanCluster || displayName,
-                  clusterUri,
-                  sizeBytes: d.size_bytes,
-                  totalCollections: d.total_collections || d.collections?.length || 0,
-                  totalDocuments: d.total_documents || 0,
-                  collections: (d.collections || []).map((c) => ({
-                    name: c.name,
-                    docCount: c.doc_count || (c as any).docCount || 0,
-                    sizeBytes: c.storage_size_bytes || 0,
-                    indexesCount: c.indexes?.length || 0,
-                  })),
-                });
-              } else {
-                dbList.push({
-                  id: `${item.profile.id}-${fallbackDbName}`,
-                  profileId: item.profile.id,
-                  name: fallbackDbName,
-                  actualDbName: fallbackDbName,
-                  clusterName: cleanCluster || fallbackDbName,
-                  clusterUri,
-                  sizeBytes: 0,
-                  totalCollections: 0,
-                  totalDocuments: 0,
-                  collections: [],
-                });
-              }
-            });
-        }
-      } catch (overviewErr) {
-        console.warn('Live overview unavailable, falling back to profiles:', overviewErr);
-      }
-
-      // Fallback: raw profile list
-      if (dbList.length === 0) {
-        try {
-          const rawProfiles = await listProfiles();
-          const targets = rawProfiles.filter((p) => p.type === 'target');
-          targets.forEach((p) => {
-            const uri = p.config?.uri || '';
-            const match = p.name.match(/\(([^)]+)\)$/);
-            const dbName = match ? match[1].trim() : p.name.trim();
-            dbList.push({
-              id: `${p.id}-${dbName}`,
-              profileId: p.id,
-              name: dbName,
-              actualDbName: dbName,
-              clusterName: p.name,
-              clusterUri: uri,
+          let dbItem: TestDatabaseItem;
+          if (item.catalog?.databases && item.catalog.databases.length > 0) {
+            const realDbs = item.catalog.databases.filter(
+              (d) => (d.collections && d.collections.length > 0) || d.size_bytes > 0 || (d.total_collections || 0) > 0
+            );
+            const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
+            const matchingDb =
+              dbsToShow.find((d) => d.name.toLowerCase() === userDbName.toLowerCase()) || dbsToShow[0];
+            const d = matchingDb;
+            const displayName = userDbName || d.name;
+            dbItem = {
+              id: `${item.profile.id}-${displayName}`,
+              profileId: item.profile.id,
+              name: displayName,
+              actualDbName: d.name,
+              clusterName: cleanCluster || displayName,
+              clusterUri,
+              sizeBytes: d.size_bytes,
+              totalCollections: d.total_collections || d.collections?.length || 0,
+              totalDocuments: d.total_documents || 0,
+              collections: (d.collections || []).map((c) => ({
+                name: c.name,
+                docCount: c.doc_count || (c as any).docCount || 0,
+                sizeBytes: c.storage_size_bytes || 0,
+                indexesCount: c.indexes?.length || 0,
+              })),
+            };
+          } else {
+            dbItem = {
+              id: `${item.profile.id}-${fallbackDbName}`,
+              profileId: item.profile.id,
+              name: fallbackDbName,
+              actualDbName: fallbackDbName,
+              clusterName: cleanCluster || fallbackDbName,
+              clusterUri,
               sizeBytes: 0,
               totalCollections: 0,
               totalDocuments: 0,
               collections: [],
-            });
+            };
+          }
+
+          // Progressively add each card as it arrives
+          setTestDatabases((prev) => {
+            const exists = prev.some((p) => (p.profileId || p.id) === (dbItem.profileId || dbItem.id));
+            return exists ? prev : [...prev, dbItem];
           });
-        } catch (profileErr) {
-          console.error('Failed to load fallback profiles:', profileErr);
+
+          // Clear initial loading spinner once first card is ready
+          if (!firstCardRendered) {
+            firstCardRendered = true;
+            setLoading(false);
+          }
         }
+      } catch (streamErr) {
+        console.warn('Stream unavailable, falling back to profile list:', streamErr);
       }
 
-      // Deduplicate by profileId first (one card per registered profile),
-      // then fall back to name deduplication for fallback-path entries.
-      const uniqueDbs = Array.from(
-        new Map(dbList.map((item) => [item.profileId || `${item.name}-${item.clusterUri}`, item])).values()
-      );
-      setTestDatabases(uniqueDbs);
+      // Fallback: raw profile list when stream yields nothing
+      setTestDatabases((current) => {
+        if (current.length > 0) return current; // stream already gave us data
+        // (async fallback below will update state)
+        return current;
+      });
+
+      // Async safety-net fallback (runs after await so state check is stale — use functional update)
+      const afterStream = (snapshot: TestDatabaseItem[]) => snapshot;
+      setTestDatabases((snapshot) => {
+        if (snapshot.length === 0 && seenProfileIds.size === 0) {
+          // kick off fallback asynchronously; we can't await inside setState
+          (async () => {
+            try {
+              const rawProfiles = await listProfiles();
+              const targets = rawProfiles.filter((p) => p.type === 'target');
+              const fallbackItems: TestDatabaseItem[] = targets.map((p) => {
+                const uri = p.config?.uri || '';
+                const match = p.name.match(/\(([^)]+)\)$/);
+                const dbName = match ? match[1].trim() : p.name.trim();
+                return {
+                  id: `${p.id}-${dbName}`,
+                  profileId: p.id,
+                  name: dbName,
+                  actualDbName: dbName,
+                  clusterName: p.name,
+                  clusterUri: uri,
+                  sizeBytes: 0,
+                  totalCollections: 0,
+                  totalDocuments: 0,
+                  collections: [],
+                };
+              });
+              if (fallbackItems.length > 0) setTestDatabases(fallbackItems);
+            } catch (e) {
+              console.error('Failed to load fallback profiles:', e);
+            }
+          })();
+        }
+        return afterStream(snapshot);
+      });
     } catch (e) {
       console.error('Failed to load test databases:', e);
     } finally {

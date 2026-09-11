@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { fetchConnectionsOverview, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, fetchCatalog, cancelJob } from '../../api/client';
+import { streamConnectionsOverview, listProfiles, saveProfile, updateProfile, deleteProfile, testConnection, fetchCatalog, cancelJob } from '../../api/client';
 import { ProdDatabaseItem, SideBySideCloneView, isJobMatchingDb } from '../Clone/SideBySideCloneView';
 import { CloneJob } from '../../types';
 import {
@@ -101,169 +101,183 @@ export const ProductionDashboard: React.FC<ProductionDashboardProps> = ({
     loadProdDatabases(false);
   }, []);
 
-  async function loadProdDatabases(showSpinner = true) {
-    if (showSpinner) setRefreshing(true);
+  async function loadProdDatabases(forceRefresh = false) {
     setLoading(true);
+    setRefreshing(forceRefresh);
+
+    // Clear list so cards stream in fresh on explicit refresh
+    if (forceRefresh) setProdDatabases([]);
+
     try {
-      const dbList: ProdDatabaseItem[] = [];
+      const seenProfileIds = new Set<string>();
+      let firstCardRendered = false;
 
-      // 1. Primary: Fetch live connection inspection overview
+      // 1. Primary: stream live connection overview filtered to 'source' type
       try {
-        const data = await fetchConnectionsOverview();
-        if (data && data.length > 0) {
-          data
-            .filter((item) => item.profile.type === 'source')
-            .forEach((item) => {
-              const clusterUri = item.profile.config.uri || '';
-              const profileRawName = item.profile.name || '';
+        for await (const item of streamConnectionsOverview(forceRefresh)) {
+          if (item.profile.type !== 'source') continue;
 
-              const extractDbFromUri = (uri: string): string => {
-                try {
-                  const u = uri.split('?')[0].replace(/\/+$/, '');
-                  const lastSlash = u.lastIndexOf('/');
-                  if (lastSlash !== -1) {
-                    const sub = u.substring(lastSlash + 1);
-                    if (sub && sub !== 'admin' && !sub.includes('@') && !sub.includes(':')) {
-                      return sub;
-                    }
-                  }
-                } catch {}
-                return '';
-              };
+          const clusterUri = item.profile.config.uri || '';
+          const profileRawName = item.profile.name || '';
+          const profileKey = item.profile.id || `${profileRawName}-${clusterUri}`;
 
-              const extractDbFromProfile = (name: string): string => {
-                const match = name.match(/\(([^)]+)\)$/);
-                if (match && match[1]) return match[1].trim();
-                return name.trim();
-              };
+          if (seenProfileIds.has(profileKey)) continue;
+          seenProfileIds.add(profileKey);
 
-              const extractClusterFromProfile = (name: string, dbName: string): string => {
-                const match = name.match(/^(.*?)\s*\(([^)]+)\)$/);
-                if (match) {
-                  const c = match[1].trim();
-                  const inner = match[2].trim();
-                  if (c && c.toLowerCase() !== inner.toLowerCase() && c.toLowerCase() !== dbName.toLowerCase()) {
-                    return c;
-                  }
+          const extractDbFromUri = (uri: string): string => {
+            try {
+              const u = uri.split('?')[0].replace(/\/+$/, '');
+              const lastSlash = u.lastIndexOf('/');
+              if (lastSlash !== -1) {
+                const sub = u.substring(lastSlash + 1);
+                if (sub && sub !== 'admin' && !sub.includes('@') && !sub.includes(':')) {
+                  return sub;
                 }
-                if (name && name.toLowerCase() !== dbName.toLowerCase() && !name.includes('(')) {
-                  return name;
-                }
-                return '';
-              };
-
-              const userDbName = extractDbFromProfile(profileRawName);
-              const cleanCluster = extractClusterFromProfile(profileRawName, userDbName);
-
-              const fallbackDbName =
-                userDbName ||
-                extractDbFromUri(clusterUri) ||
-                profileRawName ||
-                'database';
-
-              if (item.catalog?.databases && item.catalog.databases.length > 0) {
-                const realDbs = item.catalog.databases.filter(
-                  (d) => (d.collections && d.collections.length > 0) || d.size_bytes > 0 || (d.total_collections || 0) > 0
-                );
-                const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
-
-                dbsToShow.forEach((d) => {
-                  // If there is only 1 DB on this connection profile, or if d.name matches userDbName:
-                  // The user custom configured this database profile as `userDbName` (e.g. "test-google-8").
-                  // Never overwrite userDbName with the physical cluster db name ("ag-google").
-                  const displayName = (dbsToShow.length === 1 && userDbName)
-                    ? userDbName
-                    : (userDbName && d.name.toLowerCase() === userDbName.toLowerCase())
-                    ? userDbName
-                    : d.name;
-
-                  dbList.push({
-                    id: `${item.profile.id}-${displayName}`,
-                    profileId: item.profile.id,
-                    name: displayName,
-                    actualDbName: d.name,
-                    clusterName: cleanCluster || displayName,
-                    clusterUri,
-                    sizeBytes: d.size_bytes,
-                    totalCollections: d.total_collections || d.collections?.length || 0,
-                    totalDocuments: d.total_documents || 0,
-                    collections: (d.collections || []).map((c) => ({
-                      name: c.name,
-                      docCount: c.doc_count || (c as any).docCount || 0,
-                      sizeBytes: c.storage_size_bytes || 0,
-                      indexesCount: c.indexes?.length || 0,
-                    })),
-                  });
-                });
-              } else {
-                // Fallback: If catalog inspection is empty or offline, still register the database card!
-                dbList.push({
-                  id: `${item.profile.id}-${fallbackDbName}`,
-                  profileId: item.profile.id,
-                  name: fallbackDbName,
-                  actualDbName: fallbackDbName,
-                  clusterName: cleanCluster || fallbackDbName,
-                  clusterUri,
-                  sizeBytes: 0,
-                  totalCollections: 0,
-                  totalDocuments: 0,
-                  collections: [],
-                });
               }
+            } catch {}
+            return '';
+          };
+
+          const extractDbFromProfile = (name: string): string => {
+            const match = name.match(/\(([^)]+)\)$/);
+            if (match && match[1]) return match[1].trim();
+            return name.trim();
+          };
+
+          const extractClusterFromProfile = (name: string, dbName: string): string => {
+            const match = name.match(/^(.*?)\s*\(([^)]+)\)$/);
+            if (match) {
+              const c = match[1].trim();
+              const inner = match[2].trim();
+              if (c && c.toLowerCase() !== inner.toLowerCase() && c.toLowerCase() !== dbName.toLowerCase()) {
+                return c;
+              }
+            }
+            if (name && name.toLowerCase() !== dbName.toLowerCase() && !name.includes('(')) {
+              return name;
+            }
+            return '';
+          };
+
+          const userDbName = extractDbFromProfile(profileRawName);
+          const cleanCluster = extractClusterFromProfile(profileRawName, userDbName);
+          const fallbackDbName =
+            userDbName ||
+            extractDbFromUri(clusterUri) ||
+            profileRawName ||
+            'database';
+
+          const newItems: ProdDatabaseItem[] = [];
+
+          if (item.catalog?.databases && item.catalog.databases.length > 0) {
+            const realDbs = item.catalog.databases.filter(
+              (d) => (d.collections && d.collections.length > 0) || d.size_bytes > 0 || (d.total_collections || 0) > 0
+            );
+            const dbsToShow = realDbs.length > 0 ? realDbs : item.catalog.databases;
+
+            dbsToShow.forEach((d) => {
+              const displayName =
+                dbsToShow.length === 1 && userDbName
+                  ? userDbName
+                  : userDbName && d.name.toLowerCase() === userDbName.toLowerCase()
+                  ? userDbName
+                  : d.name;
+
+              newItems.push({
+                id: `${item.profile.id}-${displayName}`,
+                profileId: item.profile.id,
+                name: displayName,
+                actualDbName: d.name,
+                clusterName: cleanCluster || displayName,
+                clusterUri,
+                sizeBytes: d.size_bytes,
+                totalCollections: d.total_collections || d.collections?.length || 0,
+                totalDocuments: d.total_documents || 0,
+                collections: (d.collections || []).map((c) => ({
+                  name: c.name,
+                  docCount: c.doc_count || (c as any).docCount || 0,
+                  sizeBytes: c.storage_size_bytes || 0,
+                  indexesCount: c.indexes?.length || 0,
+                })),
+              });
             });
+          } else {
+            newItems.push({
+              id: `${item.profile.id}-${fallbackDbName}`,
+              profileId: item.profile.id,
+              name: fallbackDbName,
+              actualDbName: fallbackDbName,
+              clusterName: cleanCluster || fallbackDbName,
+              clusterUri,
+              sizeBytes: 0,
+              totalCollections: 0,
+              totalDocuments: 0,
+              collections: [],
+            });
+          }
+
+          // Merge new items into state progressively
+          setProdDatabases((prev) => {
+            const merged = [...prev];
+            for (const ni of newItems) {
+              if (!merged.some((p) => (p.profileId || p.id) === (ni.profileId || ni.id))) {
+                merged.push(ni);
+              }
+            }
+            return merged;
+          });
+
+          if (!firstCardRendered) {
+            firstCardRendered = true;
+            setLoading(false);
+          }
         }
-      } catch (overviewErr) {
-        console.warn('Live connections overview unavailable, falling back to profiles:', overviewErr);
+      } catch (streamErr) {
+        console.warn('Live overview stream unavailable, falling back to profiles:', streamErr);
       }
 
-      // 2. Always merge raw saved profiles as a safety net.
-      // This ensures every registered production DB ALWAYS appears on the dashboard,
-      // even if the live overview fails, times out, or returns no catalog data.
-      // Deduplication by profileId below ensures no duplicates from overlap.
+      // 2. Safety-net: merge raw profiles that were not covered by the stream
       try {
         const rawProfiles = await listProfiles();
         const sources = rawProfiles.filter((p) => p.type === 'source');
-        sources.forEach((p) => {
-          // Skip if already represented via overview (same profileId)
-          const alreadyAdded = dbList.some((d) => d.profileId === p.id);
-          if (alreadyAdded) return;
-
-          const uri = p.config?.uri || '';
-          const pMatch = p.name.match(/\(([^)]+)\)$/);
-          const dbName = pMatch ? pMatch[1].trim() : p.name.trim();
-          dbList.push({
-            id: `${p.id}-${dbName}`,
-            profileId: p.id,
-            name: dbName,
-            actualDbName: dbName,
-            clusterName: p.name,
-            clusterUri: uri,
-            sizeBytes: 0,
-            totalCollections: 0,
-            totalDocuments: 0,
-            collections: [],
-          });
+        setProdDatabases((current) => {
+          const merged = [...current];
+          for (const p of sources) {
+            const alreadyAdded = merged.some((d) => d.profileId === p.id);
+            if (alreadyAdded) continue;
+            const uri = p.config?.uri || '';
+            const pMatch = p.name.match(/\(([^)]+)\)$/);
+            const dbName = pMatch ? pMatch[1].trim() : p.name.trim();
+            merged.push({
+              id: `${p.id}-${dbName}`,
+              profileId: p.id,
+              name: dbName,
+              actualDbName: dbName,
+              clusterName: p.name,
+              clusterUri: uri,
+              sizeBytes: 0,
+              totalCollections: 0,
+              totalDocuments: 0,
+              collections: [],
+            });
+          }
+          return merged;
         });
       } catch (profileErr) {
         console.error('Failed to load fallback profiles:', profileErr);
       }
 
-      // Deduplicate by profileId first, then name+uri as secondary key
-      const uniqueDbs = Array.from(
-        new Map(dbList.map((item) => [item.profileId || `${item.name}-${item.clusterUri}`, item])).values()
-      );
-      setProdDatabases(uniqueDbs);
-
       // Keep selected database updated if already selected by user
       if (selectedDbForClone) {
-        const match = uniqueDbs.find(
-          (d) =>
-            d.name.toLowerCase() === selectedDbForClone.name.toLowerCase() ||
-            (d.actualDbName && d.actualDbName.toLowerCase() === selectedDbForClone.name.toLowerCase())
-        );
-        if (match) {
-          setSelectedDbForClone(match);
-        }
+        setProdDatabases((uniqueDbs) => {
+          const match = uniqueDbs.find(
+            (d) =>
+              d.name.toLowerCase() === selectedDbForClone.name.toLowerCase() ||
+              (d.actualDbName && d.actualDbName.toLowerCase() === selectedDbForClone.name.toLowerCase())
+          );
+          if (match) setSelectedDbForClone(match);
+          return uniqueDbs;
+        });
       }
     } catch (e) {
       console.error('Failed to load production databases:', e);
