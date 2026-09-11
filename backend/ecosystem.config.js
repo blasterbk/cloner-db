@@ -39,23 +39,21 @@ module.exports = {
       min_uptime: '10s',       // Treat process as stable after 10s
 
       // --- Go GC Tuning ---
-      // GOGC=50 makes Go collect garbage twice as frequently (50% heap growth trigger
-      // instead of default 100%). This keeps peak RSS lower at the cost of ~5-10%
-      // more CPU. Critical for large clone jobs to avoid memory spikes.
-      //
-      // GOMEMLIMIT sets a soft memory cap — Go will GC more aggressively when
-      // approaching this limit. Set to ~80% of max_memory_restart to keep headroom.
+      // GOGC=30: GC triggers at 30% heap growth instead of default 100%.
+      // GOMEMLIMIT: hard soft-limit so Go GCs aggressively before PM2 kills at 4G.
+      // Set to 3.5GiB (500MB headroom below max_memory_restart of 4G).
       env: {
         NODE_ENV: 'production',
         PORT: '8080',
-        GOGC: '50',
-        GOMEMLIMIT: '3GiB',
+        GOGC: '30',
+        GOMEMLIMIT: '3500MiB',
 
-        // --- Clone Performance Tuning (mirrors .env settings) ---
-        // Change these values to tune clone speed without rebuilding.
-        // After editing: pm2 reload mongoclone
-        DEFAULT_BATCH_SIZE: '5000',      // docs per InsertMany batch (range: 1000–20000)
-        DEFAULT_PARALLEL_WORKERS: '6',   // parallel collection workers (range: 1–16)
+        // --- Clone Performance Tuning ---
+        // CRITICAL: These were 5000/6 which caused 5.8GB OOM crashes.
+        // 500 docs/batch × 3 parallel collections = ~20x less peak batch RAM.
+        // After editing: pm2 reload mongoclone --update-env
+        DEFAULT_BATCH_SIZE: '500',       // docs per InsertMany batch (was 5000 → OOM)
+        DEFAULT_PARALLEL_WORKERS: '3',   // parallel collection workers (was 6 → OOM)
 
         // --- Authentication ---
         // Must match AUTH_USERNAME / AUTH_PASSWORD in .env
