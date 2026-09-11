@@ -48,10 +48,10 @@ type BatchCopier struct {
 // NewBatchCopier creates a new BatchCopier.
 func NewBatchCopier(sourceClient, targetClient *mongo.Client, opts CopierOptions) *BatchCopier {
 	if opts.BatchSize <= 0 {
-		opts.BatchSize = 5000 // 5000 docs/batch: fewer InsertMany round trips vs 2500 default
+		opts.BatchSize = 500 // Reduced from 5000: much lower peak RAM per collection batch buffer
 	}
 	if opts.NumWorkers <= 0 {
-		opts.NumWorkers = 6 // 6 parallel ingestion workers: better I/O saturation on 4+ core servers
+		opts.NumWorkers = 2 // 2 insert workers per collection
 	}
 	return &BatchCopier{
 		sourceClient: sourceClient,
@@ -97,10 +97,11 @@ func (c *BatchCopier) CopyCollection(ctx context.Context, sourceDB, sourceColl, 
 		numWorkers = 4
 	}
 
-	// Buffer size: numWorkers keeps the write workers saturated without holding excess
-	// batches in RAM. Reduced from numWorkers*2 — at batch=5000 docs and 6 workers,
-	// the old buffer could accumulate 60K docs × avg-doc-size bytes at peak RSS.
-	batchChan := make(chan docBatch, numWorkers)
+	// Buffer size: 1 slot provides strict backpressure — the cursor producer blocks until
+	// the insert worker finishes the current batch before reading more docs. This means
+	// at most 2 batches (1 in-channel + 1 being inserted) are in RAM per collection at once.
+	// With batch=500 and 3 parallel collections, peak batch RAM = 3 × 2 × 500 × avgDocSize.
+	batchChan := make(chan docBatch, 1)
 	var transferredDocs int64
 	var transferredBytes int64
 	var workerWg sync.WaitGroup

@@ -443,7 +443,10 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 		batchSize = o.defaultBatchSize // from DEFAULT_BATCH_SIZE in .env
 	}
 	if batchSize <= 0 {
-		batchSize = 5000 // built-in default
+		// 500 docs/batch: ~10x smaller than old default of 5000.
+		// Reduces peak heap from batch buffers from ~GB to ~100MB range.
+		// More InsertMany round trips but same total throughput on fast networks.
+		batchSize = 500
 	}
 
 	// Concurrency workers: parallel collections streamed simultaneously
@@ -452,7 +455,9 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 		numWorkers = o.defaultParallelWorkers // from DEFAULT_PARALLEL_WORKERS in .env
 	}
 	if numWorkers <= 0 {
-		numWorkers = 6 // built-in default
+		// 3 parallel collections: reduced from 6 to halve peak concurrent batch RAM.
+		// 3 workers still saturates I/O on most networks while staying memory-safe.
+		numWorkers = 3
 	}
 
 	job.AddLog("INFO", fmt.Sprintf("🚀 High-Speed Engine active: %d parallel collection workers, batch size: %d", numWorkers, batchSize))
@@ -547,7 +552,7 @@ func (o *Orchestrator) runJob(ctx context.Context, job *types.CloneJob, isResumi
 				// 4c. Setup Copier with Checkpointing callback
 				copier := NewBatchCopier(sourceClient, targetClient, CopierOptions{
 					BatchSize:        batchSize,
-					NumWorkers:       2,
+					NumWorkers:       1, // 1 insert worker per collection: reduces concurrent batch-in-flight RAM
 					DropTargetFirst:  job.Request.DropTargetFirst,
 					ResumeFromID:     resumeID,
 					Masker:           masker,

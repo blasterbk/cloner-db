@@ -154,10 +154,12 @@ func loadEnvFile(path string) {
 
 func main() {
 	startTime := time.Now()
-	// Set GC target percentage to 50 (half the default of 100).
-	// This triggers garbage collection when heap grows by 50% instead of 100%,
-	// significantly reducing peak RSS during memory-intensive batch clone operations.
-	debug.SetGCPercent(50)
+	// Hard soft-memory limit: Go will aggressively GC when live heap approaches this
+	// threshold, preventing PM2's 4 GB --max-memory-restart from being triggered.
+	// Set to 3.5 GB to give Go ~500 MB headroom below PM2's hard kill at 4 GB.
+	debug.SetMemoryLimit(3_500_000_000) // 3.5 GB
+	// Also lower GOGC to run GC cycles more frequently (trigger at 30% heap growth vs default 100%).
+	debug.SetGCPercent(30)
 	// Load .env file from current working directory (backend root)
 	loadEnvFile(".env")
 	loadEnvFile("../.env") // also try repo root
